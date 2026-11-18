@@ -717,8 +717,9 @@ class Bot:
             self.tg.message("<pre>" + html.escape(verdict["caption"]) + "</pre>", parse_html=True)
             self.sent_times.append(time.time())
             self.stats["sent"] += 1
-            yt = self.yt_on and verdict["score"] >= C["yt_min_score"]
-            ig = self.ig_on and verdict["score"] >= C["ig_min_score"]
+            only = job.get("platforms")  # optional: nur bestimmte Plattformen (z. B. Test)
+            yt = self.yt_on and verdict["score"] >= C["yt_min_score"] and (not only or "youtube" in only)
+            ig = self.ig_on and verdict["score"] >= C["ig_min_score"] and (not only or "instagram" in only)
             if yt or ig:  # Uploads im Hintergrund, damit der nächste Clip nicht wartet
                 outbox = STATE / "outbox"
                 outbox.mkdir(exist_ok=True)
