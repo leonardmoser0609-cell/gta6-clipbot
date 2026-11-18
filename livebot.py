@@ -868,6 +868,8 @@ class Bot:
         log(f"Live-Clipper startet – {C['game']}, Top {C['top_n']} ({C['lang']}), "
             f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}, YouTube: {'an' if yt_enabled() else 'aus'}, Instagram: {'an' if ig_enabled() else 'aus'}")
         self.ut.get()  # ggf. Twitch-Freigabe einholen
+        import overlay
+        threading.Thread(target=overlay._cv2, daemon=True).start()  # OpenCV ggf. vorab installieren
         self.chat.start()
         for job in list(self.pending.values()):
             if time.time() - job.get("t", 0) < 1800:
