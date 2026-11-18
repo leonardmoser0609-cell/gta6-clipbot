@@ -416,6 +416,13 @@ class Bot:
         self.streams: dict[str, dict] = {}
         self.last_clip: dict[str, float] = {}
         self.noclip: dict[str, float] = {}
+        self.busy = False
+        self.pending_file = STATE / "pending.json"
+        self.plock = threading.Lock()
+        try:
+            self.pending: dict[str, dict] = json.loads(self.pending_file.read_text())
+        except Exception:
+            self.pending = {}
         self.sent_times: collections.deque = collections.deque()
         self.paused = False
         self.stats = collections.Counter()
@@ -450,8 +457,8 @@ class Bot:
             try:
                 clip_id = create_clip(self.ut, s["user_id"])
                 log(f"  Clip angelegt: {clip_id}")
-                self.jobs.put_nowait({"clip_id": clip_id, "stream": s, "stats": st,
-                                      "chat": chat_lines, "t": time.time(), "force": force})
+                self.enqueue({"clip_id": clip_id, "stream": s, "stats": st,
+                              "chat": chat_lines, "t": time.time(), "force": force})
             except queue.Full:
                 log("  Warteschlange voll – Moment verworfen")
             except Exception as e:
@@ -464,14 +471,30 @@ class Bot:
         threading.Thread(target=go, daemon=True).start()
 
     # --- Worker: Download, Transkript, Bewertung, Render, Telegram ---------
+    def _save_pending(self) -> None:
+        with self.plock:
+            self.pending_file.write_text(json.dumps(self.pending))
+
+    def enqueue(self, job: dict) -> None:
+        self.jobs.put_nowait(job)
+        with self.plock:
+            self.pending[job["clip_id"]] = job
+        self._save_pending()
+
     def worker(self) -> None:
         while True:
             job = self.jobs.get()
+            self.busy = True
             try:
                 self.process(job)
             except Exception as e:
                 log(f"  Verarbeitung fehlgeschlagen: {e}")
                 self.stats["errors"] += 1
+            finally:
+                with self.plock:
+                    self.pending.pop(job["clip_id"], None)
+                self._save_pending()
+                self.busy = self.jobs.qsize() > 0
 
     def process(self, job: dict) -> None:
         s, st = job["stream"], job["stats"]
@@ -564,12 +587,26 @@ class Bot:
             f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}")
         self.ut.get()  # ggf. Twitch-Freigabe einholen
         self.chat.start()
+        for job in list(self.pending.values()):
+            if time.time() - job.get("t", 0) < 1800:
+                log(f"Nehme angefangenen Clip wieder auf: {job['stream']['user_name']} {job['clip_id']}")
+                self.jobs.put_nowait(job)
+            else:
+                self.pending.pop(job["clip_id"], None)
+        self._save_pending()
         threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.commands, daemon=True).start()
+        last_start = STATE / "last_start"
         try:
-            self.tg.message(f"🟢 Live-Clipper gestartet ({C['game']}, Top {C['top_n']}). /status für Details.")
-        except Exception as e:
-            log(f"Telegram: {e}")
+            quiet = time.time() - float(last_start.read_text()) < 900  # Neustart nach Update: still
+        except Exception:
+            quiet = False
+        last_start.write_text(str(time.time()))
+        if not quiet:
+            try:
+                self.tg.message(f"🟢 Live-Clipper gestartet ({C['game']}, Top {C['top_n']}). /status für Details.")
+            except Exception as e:
+                log(f"Telegram: {e}")
         watch = {p: p.stat().st_mtime for p in [*ROOT.glob("*.py"), ROOT / ".env"] if p.exists()}
         last_refresh = 0.0
         while True:
@@ -581,10 +618,12 @@ class Bot:
                     log(f"Stream-Abfrage: {e}")
                 last_refresh = now
                 # Code/Config geändert -> sauber beenden, launchd startet neu
-                for p, m in watch.items():
-                    if p.exists() and p.stat().st_mtime != m:
-                        log(f"{p.name} geändert – Neustart")
+                changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
+                if changed:
+                    if not self.busy and self.jobs.empty():
+                        log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
+                    log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
             if not self.paused:
                 for login in list(self.streams):
                     if now - self.last_clip.get(login, 0) < C["cooldown_s"] or self.noclip.get(login, 0) > now:
