@@ -937,7 +937,7 @@ class Bot:
                 # Code/Config geändert -> sauber beenden, launchd startet neu
                 changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
                 if changed:
-                    if not self.busy and self.jobs.empty():
+                    if not self.busy and self.jobs.empty() and not self.pub_lock.locked():
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
