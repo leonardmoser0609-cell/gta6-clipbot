@@ -24,6 +24,7 @@ import queue
 import random
 import re
 import socket
+import subprocess
 import ssl
 import sys
 import tempfile
@@ -81,7 +82,7 @@ C = {
     "max_per_hour": _f("MAX_PER_HOUR", 20),
     "min_score": _f("MIN_SCORE", 6),
     "anthropic_key": os.getenv("ANTHROPIC_API_KEY") or "",
-    "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-haiku-5-5",
+    "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-sonnet-5-5",
     "hashtags": os.getenv("HASHTAGS") or "#gta6 #gtavi #gta #twitchclips #gaming #fyp",
 }
 
@@ -345,42 +346,68 @@ def triggered(st: dict) -> bool:
 # KI-Bewertung + Caption (Claude), mit regelbasiertem Fallback
 # ---------------------------------------------------------------------------
 
-def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str) -> dict | None:
+def extract_frames(src: Path, dur: float, n: int = 8) -> list[tuple[float, str]]:
+    """n Standbilder gleichmäßig über den Clip verteilt, als base64-JPEG."""
+    import base64
+    import overlay
+    frames = []
+    with tempfile.TemporaryDirectory() as td:
+        for i in range(n):
+            t = dur * (i + 0.5) / n
+            out = Path(td) / f"f{i}.jpg"
+            subprocess.run([overlay.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.2f}",
+                            "-i", str(src), "-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "4", str(out)],
+                           check=False, timeout=30)
+            if out.exists():
+                frames.append((t, base64.b64encode(out.read_bytes()).decode()))
+    return frames
+
+
+def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
+             src: Path | None = None, dur: float = 0) -> dict | None:
     if not C["anthropic_key"]:
         return None
-    transcript = " ".join(w[2] for w in words)[:3000] or "(keine Sprache erkannt)"
-    chat_txt = "\n".join(chat_lines[-60:])[:3000]
-    prompt = f"""Du bewertest einen Twitch-Clip für einen deutschen GTA-6-Clip-Account auf TikTok/Instagram Reels.
+    transcript = " ".join(f"[{w[0]:.0f}s] {w[2]}" if i % 12 == 0 else w[2]
+                          for i, w in enumerate(words))[:3500] or "(keine Sprache erkannt)"
+    chat_txt = "\n".join(chat_lines[-60:])[:3000] or "(nicht verfügbar)"
+    content: list[dict] = []
+    if src is not None and dur:
+        for t, b64 in extract_frames(src, dur):
+            content.append({"type": "text", "text": f"Standbild bei {t:.0f}s:"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+    content.append({"type": "text", "text": f"""Oben siehst du Standbilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {streamer} (GTA 6, deutscher Stream).
 
-Streamer: {streamer}
 Stream-Titel: {title}
-Chat-Aktivität im Moment: {st['factor']:.1f}x so viel wie normal, {st['hype']*100:.0f}% Hype-Nachrichten
-Transkript des Clips (automatisch, kann Fehler haben):
+Chat-Reaktion im Moment: {st['factor']:.1f}x so viel wie normal, {st['hype']*100:.0f}% Hype-Nachrichten
+Transkript (automatisch, kann Fehler haben, [Xs] = Zeitmarke):
 {transcript}
 
-Chat-Nachrichten rund um den Moment:
+Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
+Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
+
 Antworte NUR mit JSON:
-{{"score": <1-10, wie viral/unterhaltsam für Leute, die den Streamer nicht kennen>,
- "reason": "<max. 12 Wörter>",
- "hook": "<Text oben im Video, Deutsch, max. 7 Wörter, neugierig machend, KEINE Emojis>",
- "caption": "<Post-Caption auf Deutsch: 1-2 kurze Sätze mit 1-3 Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6. KEIN Credit, KEIN Link>"}}"""
+{{"what": "<1 Satz: was passiert, sachlich>",
+ "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
+ "hook": "<Titel oben im Video, Deutsch, 3-7 Wörter, beschreibt konkret das Geschehen mit Namen, z. B. 'Trymacs wird von der Polizei verhaftet' oder 'Monte crasht mit dem Jetski in eine Yacht'. Keine Emojis, keine Hashtags, kein Clickbait, das nicht stimmt>",
+ "caption": "<Post-Caption auf Deutsch: 1-2 kurze, lockere Sätze zum Geschehen mit 1-3 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": C["anthropic_model"], "max_tokens": 600,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60)
+            json={"model": C["anthropic_model"], "max_tokens": 700,
+                  "messages": [{"role": "user", "content": content}]},
+            timeout=90)
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
         j = json.loads(text[text.index("{"): text.rindex("}") + 1])
         j["score"] = int(j.get("score", 0))
+        j["reason"] = j.get("what", "")
         return j
     except Exception as e:
-        log(f"  KI-Bewertung fehlgeschlagen: {e}")
+        log(f"  KI-Bewertung fehlgeschlagen: {str(e)[:200]}")
         return None
 
 
@@ -504,7 +531,8 @@ class Bot:
             src = td / "clip.mp4"
             clip_url = fetch_clip(job["clip_id"], src)
             words = cb.transcribe(src)
-            verdict = ai_judge(name, words, job["chat"], st, s.get("title", "")) \
+            dur = cb.probe(src)["dur"]
+            verdict = ai_judge(name, words, job["chat"], st, s.get("title", ""), src, dur) \
                 or fallback_judge(name, login, words, st)
             log(f"  Bewertung {verdict['score']}/10 – {verdict.get('reason', '')}")
             if verdict["score"] < C["min_score"] and not job.get("force"):
@@ -520,6 +548,7 @@ class Bot:
                 or f"{name} in GTA 6"
             out, info = cb.make_vertical(src, td, hook, f"twitch.tv/{login}", words=words)
             info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10\n"
+                        f"📝 {html.escape(verdict.get('reason', ''))}\n"
                         f"💬 Chat {st['factor']:.1f}x · {st['hype']*100:.0f}% Hype · "
                         f"🔴 {s['viewer_count']} live\n"
                         f"⏱ {round(info['dur'])}s · fertig nach {round(time.time() - job['t'] + C['clip_delay_s'])}s\n"
