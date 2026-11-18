@@ -376,7 +376,7 @@ def extract_frames(src: Path, dur: float, n: int = 8) -> list[tuple[float, str]]
 
 
 def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
-             src: Path | None = None, dur: float = 0) -> dict | None:
+             src: Path | None = None, dur: float = 0, viewer_clip: bool = False) -> dict | None:
     if not C["anthropic_key"]:
         return None
     transcript = " ".join(f"[{w[0]:.0f}s] {w[2]}" if i % 12 == 0 else w[2]
@@ -387,6 +387,8 @@ def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
         for t, b64 in extract_frames(src, dur):
             content.append({"type": "text", "text": f"Standbild bei {t:.0f}s:"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+    other_game_rule = ("Nur wenn auf den Bildern eindeutig ein ANDERES Spiel (z. B. Minecraft) oder gar kein Spiel "
+                       "zu sehen ist, gib score 0.\n") if viewer_clip else ""
     content.append({"type": "text", "text": f"""Oben siehst du Standbilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {streamer} (GTA 6, deutscher Stream).
 
 Stream-Titel: {title}
@@ -398,8 +400,7 @@ Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
 Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
-Nur wenn auf den Bildern eindeutig ein ANDERES Spiel (z. B. Minecraft) oder gar kein Spiel zu sehen ist, gib score 0.
-
+{other_game_rule}
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was passiert, sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
@@ -747,7 +748,8 @@ class Bot:
             clip_url = fetch_clip(job["clip_id"], src)
             words = cb.transcribe(src)
             dur = cb.probe(src)["dur"]
-            verdict = ai_judge(name, words, job["chat"], st, s.get("title", ""), src, dur) \
+            verdict = ai_judge(name, words, job["chat"], st, s.get("title", ""), src, dur,
+                               viewer_clip=bool(job.get("viewer_clip"))) \
                 or fallback_judge(name, login, words, st)
             log(f"  Bewertung {verdict['score']}/10 – {verdict.get('reason', '')}")
             if verdict["score"] < C["min_score"] and not job.get("force"):
