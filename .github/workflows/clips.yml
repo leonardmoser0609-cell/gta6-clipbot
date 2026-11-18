@@ -13,6 +13,10 @@ on:
         description: "Andere Twitch-Kategorie nur für diesen Lauf (z. B. Grand Theft Auto V zum Testen)"
         type: string
         default: ""
+      lookback_min:
+        description: "Zeitfenster in Minuten nur für diesen Lauf (Standard 90)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -57,7 +61,7 @@ jobs:
           CLIPS_PER_RUN: ${{ vars.CLIPS_PER_RUN }}
           TOP_STREAMERS: ${{ vars.TOP_STREAMERS }}
           FIXED_STREAMERS: ${{ vars.FIXED_STREAMERS }}
-          LOOKBACK_MIN: ${{ vars.LOOKBACK_MIN }}
+          LOOKBACK_MIN: ${{ inputs.lookback_min || vars.LOOKBACK_MIN }}
           MIN_VIEWS: ${{ vars.MIN_VIEWS }}
           VIDEO_ZOOM: ${{ vars.VIDEO_ZOOM }}
           NOTIFY_EMPTY: ${{ vars.NOTIFY_EMPTY }}
