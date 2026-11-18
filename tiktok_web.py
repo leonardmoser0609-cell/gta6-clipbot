@@ -36,6 +36,9 @@ DONE_TEXT = re.compile(r"(Video wurde veröffentlicht|wurde gepostet|Video verö
                        r"Your video (is being|has been) (uploaded|posted)|Video wird veröffentlicht)", re.I)
 
 
+CLICK_DELAY = 2.0  # Sekunden Pause vor jedem Klick
+
+
 class NeedsHuman(RuntimeError):
     """Login fehlt oder TikTok verlangt eine Sicherheitsabfrage – das muss Leo selbst erledigen."""
 
@@ -142,6 +145,7 @@ def _dismiss(page) -> None:
         try:
             for b in page.locator(TUTORIAL_BTN).all()[:2]:
                 if b.is_visible():
+                    time.sleep(CLICK_DELAY)
                     b.click(timeout=3000)
                     clicked = True
                     time.sleep(0.8)
@@ -152,6 +156,7 @@ def _dismiss(page) -> None:
             try:
                 for b in page.get_by_role("button", name=DISMISS_NAMES).all()[:3]:
                     if b.is_visible():
+                        time.sleep(CLICK_DELAY)
                         b.click(timeout=3000)
                         clicked = True
                         time.sleep(0.8)
@@ -166,6 +171,7 @@ def _click(page, loc, tries: int = 4) -> None:
     """Klicken; liegt ein Hinweis-Overlay darüber, erst wegklicken und nochmal versuchen."""
     for i in range(tries):
         try:
+            time.sleep(CLICK_DELAY)
             loc.click(timeout=8000)
             return
         except Exception:
@@ -296,6 +302,7 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
                 try:
                     c = page.get_by_role("button", name=CONFIRM_NAMES)
                     if c.count() and c.first.is_visible():
+                        time.sleep(CLICK_DELAY)
                         c.first.click()
                 except Exception:
                     pass
