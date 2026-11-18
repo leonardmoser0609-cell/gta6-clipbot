@@ -85,6 +85,8 @@ C = {
     "anthropic_key": os.getenv("ANTHROPIC_API_KEY") or "",
     "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-sonnet-5-5",
     "hashtags": os.getenv("HASHTAGS") or "#gta6 #gtavi #gta #twitchclips #gaming #fyp",
+    "yt_min_score": _f("YT_MIN_SCORE", 6),
+    "yt_max_per_day": _f("YT_MAX_PER_DAY", 60),
 }
 
 # ---------------------------------------------------------------------------
@@ -431,6 +433,50 @@ def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# YouTube-Upload (Kanal „GTA 6 Highlights DE“)
+# ---------------------------------------------------------------------------
+
+_YT = {"access": None, "exp": 0.0}
+
+
+def yt_enabled() -> bool:
+    return all(os.getenv(k) for k in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"))
+
+
+def yt_access() -> str:
+    if _YT["access"] and time.time() < _YT["exp"] - 120:
+        return _YT["access"]
+    r = requests.post("https://oauth2.googleapis.com/token", timeout=30, data={
+        "client_id": os.environ["YT_CLIENT_ID"].strip(), "client_secret": os.environ["YT_CLIENT_SECRET"].strip(),
+        "refresh_token": os.environ["YT_REFRESH_TOKEN"].strip(), "grant_type": "refresh_token"})
+    if not r.ok:
+        raise RuntimeError(f"YouTube-Token: {r.status_code} {r.text[:200]}")
+    _YT["access"], _YT["exp"] = r.json()["access_token"], time.time() + int(r.json().get("expires_in", 3600))
+    return _YT["access"]
+
+
+def youtube_upload(path: Path, title: str, description: str, tags: list[str]) -> str:
+    meta = {"snippet": {"title": title[:100], "description": description[:4900], "tags": tags[:15],
+                        "categoryId": "20", "defaultLanguage": "de", "defaultAudioLanguage": "de"},
+            "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False,
+                       "containsSyntheticMedia": False, "embeddable": True}}
+    size = path.stat().st_size
+    init = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        headers={"Authorization": f"Bearer {yt_access()}", "Content-Type": "application/json; charset=UTF-8",
+                 "X-Upload-Content-Type": "video/mp4", "X-Upload-Content-Length": str(size)},
+        data=json.dumps(meta), timeout=60)
+    if not init.ok:
+        raise RuntimeError(f"YouTube-Start {init.status_code}: {init.text[:250]}")
+    with open(path, "rb") as f:
+        r = requests.put(init.headers["Location"], data=f, timeout=900,
+                         headers={"Authorization": f"Bearer {yt_access()}", "Content-Type": "video/mp4"})
+    if not r.ok:
+        raise RuntimeError(f"YouTube-Upload {r.status_code}: {r.text[:250]}")
+    return f"https://youtube.com/shorts/{r.json()['id']}"
+
+
+# ---------------------------------------------------------------------------
 # Verarbeitung eines Moments
 # ---------------------------------------------------------------------------
 
@@ -445,6 +491,8 @@ class Bot:
         self.last_clip: dict[str, float] = {}
         self.noclip: dict[str, float] = {}
         self.used_clips: set[str] = set()
+        self.yt_on = yt_enabled()
+        self.yt_times: collections.deque = collections.deque()
         self.busy = False
         self.pending_file = STATE / "pending.json"
         self.plock = threading.Lock()
@@ -604,7 +652,32 @@ class Bot:
             self.tg.message("<pre>" + html.escape(verdict["caption"]) + "</pre>", parse_html=True)
             self.sent_times.append(time.time())
             self.stats["sent"] += 1
+            if self.yt_on and verdict["score"] >= C["yt_min_score"]:
+                self.post_youtube(out, verdict, name, login)
             log(f"  ✅ an Telegram geschickt ({time.time() - job['t'] + C['clip_delay_s']:.0f}s nach dem Moment)")
+
+    def post_youtube(self, out: Path, verdict: dict, name: str, login: str) -> None:
+        now = time.time()
+        while self.yt_times and self.yt_times[0] < now - 86400:
+            self.yt_times.popleft()
+        if len(self.yt_times) >= C["yt_max_per_day"]:
+            log("  YouTube: Tageslimit erreicht – nicht hochgeladen")
+            return
+        hook = (verdict.get("hook") or f"{name} in GTA 6").strip().rstrip(".")
+        title = f"{hook} 😂 #gta6 #shorts"
+        tags = ["gta 6", "gta6", "gta vi", "gta 6 deutsch", name, "twitch clips", "gaming", "gta 6 highlights"]
+        try:
+            url = youtube_upload(out, title, verdict.get("caption", ""), tags)
+            self.yt_times.append(time.time())
+            self.stats["youtube"] += 1
+            log(f"  ▶️ YouTube: {url}")
+            self.tg.message(f"▶️ Auf YouTube: {url}")
+        except Exception as e:
+            log(f"  YouTube-Upload fehlgeschlagen: {e}")
+            try:
+                self.tg.message(f"⚠️ YouTube-Upload fehlgeschlagen: {str(e)[:300]}")
+            except Exception:
+                pass
 
     # --- Telegram-Befehle ---------------------------------------------------
     def commands(self) -> None:
@@ -637,9 +710,17 @@ class Bot:
                 lines.append(f"• {s['user_name']} – {s['viewer_count']} Zuschauer – Chat {rate}{lock}")
             if not self.streams:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
+            lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
+                         f"heute {len(self.yt_times)} hochgeladen")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
                          f"{self.stats['rejected']} aussortiert, {self.stats['errors']} Fehler")
             self.tg.message("\n".join(lines))
+        elif cmd == "/yt":
+            if not yt_enabled():
+                self.tg.message("YouTube ist nicht verbunden.")
+            else:
+                self.yt_on = arg.strip().lower() not in ("off", "aus", "0")
+                self.tg.message(f"YouTube-Autoupload {'an ▶️' if self.yt_on else 'aus ⏸'}")
         elif cmd == "/pause":
             self.paused = True
             self.tg.message("⏸ Pausiert. Mit /resume geht's weiter.")
@@ -655,12 +736,12 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer>")
+            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /yt on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
         log(f"Live-Clipper startet – {C['game']}, Top {C['top_n']} ({C['lang']}), "
-            f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}")
+            f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}, YouTube: {'an' if yt_enabled() else 'aus'}")
         self.ut.get()  # ggf. Twitch-Freigabe einholen
         self.chat.start()
         for job in list(self.pending.values()):
