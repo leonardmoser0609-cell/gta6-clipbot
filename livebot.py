@@ -358,14 +358,14 @@ def triggered(st: dict) -> bool:
 # KI-Bewertung + Caption (Claude), mit regelbasiertem Fallback
 # ---------------------------------------------------------------------------
 
-def extract_frames(src: Path, dur: float, n: int = 8) -> list[tuple[float, str]]:
-    """n Standbilder gleichmäßig über den Clip verteilt, als base64-JPEG."""
+def extract_frames(src: Path, dur: float, n: int = 8, times: list[float] | None = None) -> list[tuple[float, str]]:
+    """Standbilder als base64-JPEG – an festen Zeitpunkten oder gleichmäßig über den Clip verteilt."""
     import base64
     import overlay
+    times = times or [dur * (i + 0.5) / n for i in range(n)]
     frames = []
     with tempfile.TemporaryDirectory() as td:
-        for i in range(n):
-            t = dur * (i + 0.5) / n
+        for i, t in enumerate(times):
             out = Path(td) / f"f{i}.jpg"
             subprocess.run([overlay.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.2f}",
                             "-i", str(src), "-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "4", str(out)],
@@ -375,37 +375,111 @@ def extract_frames(src: Path, dur: float, n: int = 8) -> list[tuple[float, str]]
     return frames
 
 
+def find_climax(src: Path, dur: float) -> tuple[float, bool]:
+    """Höhepunkt = lauteste Stelle im hinteren Teil (Streamer schreit/lacht/rastet aus).
+    Rückgabe (Sekunde, eindeutig?). Ohne klare Stelle: Mitte der letzten 12 Sekunden."""
+    import numpy as np
+    import overlay
+    fallback = (max(0.0, dur - 6), False)
+    try:
+        pcm = subprocess.run([overlay.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn",
+                              "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                             check=True, capture_output=True, timeout=120).stdout
+    except Exception:
+        return fallback
+    a = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+    hop = 4000  # 0,5 s
+    n = a.size // hop
+    if n < 8:
+        return fallback
+    rms = np.sqrt((a[:n * hop].reshape(n, hop) ** 2).mean(axis=1)) + 1e-6
+    db = np.convolve(20 * np.log10(rms), np.ones(3) / 3, mode="same")  # über 1,5 s glätten
+    t = (np.arange(n) + 0.5) * 0.5
+    mask = (t >= dur * 0.3) & (t <= dur - 0.5)  # Höhepunkt liegt praktisch nie ganz vorne
+    if not mask.any():
+        return fallback
+    i = int(np.argmax(np.where(mask, db, -1e9)))
+    if db[i] - float(np.median(db)) < 6.0:  # keine deutlich lautere Stelle
+        return fallback
+    return float(t[i]), True
+
+
+def climax_plan(dur: float, peak: float, clear: bool) -> tuple[list[float], float, float]:
+    """3 Bilder Vorgeschichte + 5 Bilder dicht um den Höhepunkt (alle 1,5 s). Gibt auch das Höhepunkt-Fenster."""
+    def clamp(x):
+        return min(max(0.2, x), max(0.2, dur - 0.2))
+    if clear:
+        hi = [peak - 4.5, peak - 3, peak - 1.5, peak, peak + 1.5]
+        win = (peak - 7, peak + 3)
+    else:
+        hi = [dur - 11, dur - 8.5, dur - 6, dur - 3.5, dur - 1]
+        win = (dur - 12, dur)
+    hi = [clamp(x) for x in hi]
+    ctx_end = max(1.0, min(hi) - 1)
+    ctx = [clamp(ctx_end * f) for f in (1 / 6, 3 / 6, 5 / 6)]
+    return ctx + hi, max(0.0, win[0]), min(dur, win[1])
+
+
+def transcript_lines(words, win: tuple[float, float], limit: int = 3500) -> str:
+    """Transkript satzweise mit Zeitmarke; Sätze im Höhepunkt-Fenster mit »HÖHEPUNKT« markiert."""
+    segs, cur = [], []
+    for w in words or []:
+        if cur and (w[0] - cur[-1][1] > 0.8 or len(cur) >= 15):
+            segs.append(cur)
+            cur = []
+        cur.append(w)
+        if w[2].rstrip().endswith((".", "!", "?")):
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+    lines = []
+    for sg in segs:
+        a, b = sg[0][0], sg[-1][1]
+        mark = "»HÖHEPUNKT« " if b >= win[0] and a <= win[1] else ""
+        lines.append(f"[{a:.0f}s] {mark}{' '.join(x[2] for x in sg)}")
+    while lines and len("\n".join(lines)) > limit:  # zu lang: vorne kürzen, Höhepunkt bleibt
+        lines.pop(0)
+    return "\n".join(lines)
+
+
 def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
              src: Path | None = None, dur: float = 0, viewer_clip: bool = False) -> dict | None:
     if not C["anthropic_key"]:
         return None
-    transcript = " ".join(f"[{w[0]:.0f}s] {w[2]}" if i % 12 == 0 else w[2]
-                          for i, w in enumerate(words))[:3500] or "(keine Sprache erkannt)"
+    peak, clear = find_climax(src, dur) if (src is not None and dur) else (max(0.0, dur - 6), False)
+    times, w0, w1 = climax_plan(dur, peak, clear)
+    log(f"  Höhepunkt: ~{peak:.0f}s ({'lauteste Stelle' if clear else 'keine klare Stelle – letzte 12 s'})")
+    transcript = transcript_lines(words, (w0, w1)) or "(keine Sprache erkannt)"
     chat_txt = "\n".join(chat_lines[-60:])[:3000] or "(nicht verfügbar)"
+    peak_txt = (f"ca. Sekunde {peak:.0f} (lauteste Stelle – da schreit/lacht/reagiert der Streamer)" if clear
+                else f"in den letzten 12 Sekunden (Sekunde {w0:.0f}–{w1:.0f}), keine eindeutig laute Stelle")
     content: list[dict] = []
     if src is not None and dur:
-        for t, b64 in extract_frames(src, dur):
-            content.append({"type": "text", "text": f"Standbild bei {t:.0f}s:"})
+        for i, (t, b64) in enumerate(extract_frames(src, dur, times=times)):
+            tag = "Vorgeschichte" if i < 3 else "HÖHEPUNKT"
+            content.append({"type": "text", "text": f"Standbild bei {t:.1f}s ({tag}):"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
     other_game_rule = ("Nur wenn auf den Bildern eindeutig ein ANDERES Spiel (z. B. Minecraft) oder gar kein Spiel "
                        "zu sehen ist, gib score 0.\n") if viewer_clip else ""
     content.append({"type": "text", "text": f"""Oben siehst du Standbilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {streamer} (GTA 6, deutscher Stream).
 
 Stream-Titel: {title}
+Höhepunkt des Clips: {peak_txt}. Die ersten 3 Bilder zeigen die Vorgeschichte, die 5 mit HÖHEPUNKT markierten liegen dicht um den Höhepunkt.
 Chat-Reaktion im Moment: {st['factor']:.1f}x so viel wie normal, {st['hype']*100:.0f}% Hype-Nachrichten
-Transkript (automatisch, kann Fehler haben, [Xs] = Zeitmarke):
+Transkript (automatisch, kann Fehler haben, [Xs] = Zeitmarke, »HÖHEPUNKT« = gesagt im Höhepunkt):
 {transcript}
 
 Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
-Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
+Aufgabe: Finde heraus, WAS im HÖHEPUNKT konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Die Vorgeschichte ist nur Kontext. Erfinde nichts, was nicht erkennbar ist.
 {other_game_rule}Geht es im Moment um Sub-Gifts, Subs, Spenden oder Danksagungen dafür (statt um das Spiel), gib score 0.
 
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
-{{"what": "<1 Satz: was passiert, sachlich>",
+{{"what": "<1 Satz: was im Höhepunkt passiert (mit kurzer Vorgeschichte), sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
- "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-8 Wörter, beschreibt konkret das Geschehen mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
+ "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht eindeutig zu erkennen, was im Höhepunkt passiert, bau den Titel aus dem, was der Streamer dort sagt oder ruft (Zeilen mit »HÖHEPUNKT«), gern als kurzes Zitat, z. B. 'Trymacs: „Wo ist mein Boot hin?!“ in GTA 6 😂'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
  "caption": "<Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     text = ""
     for attempt in range(2):
