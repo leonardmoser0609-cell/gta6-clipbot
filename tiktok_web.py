@@ -27,7 +27,10 @@ CAPTCHA = ("#captcha-verify-container, .captcha_verify_container, .captcha-verif
            "iframe[src*='captcha'], div[class*='captcha_verify']")
 POST_NAMES = re.compile(r"^\s*(Posten|Post|Veröffentlichen|Publish)\s*$", re.I)
 CONFIRM_NAMES = re.compile(r"^\s*(Jetzt posten|Post now|Trotzdem posten|Post anyway)\s*$", re.I)
-DISMISS_NAMES = re.compile(r"^\s*(Optionale Cookies ablehnen|Decline optional cookies|Verstanden|Got it|OK)\s*$", re.I)
+DISMISS_NAMES = re.compile(r"^\s*(Optionale Cookies ablehnen|Decline optional cookies|Verstanden|Got it|OK|Last)\s*$",
+                           re.I)
+TUTORIAL_BTN = (".tutorial-tooltip button, .react-joyride__tooltip button[data-action='primary'], "
+                "button[data-test-id='button-primary']")
 DONE_TEXT = re.compile(r"(Video wurde veröffentlicht|wurde gepostet|Video veröffentlicht|has been published|"
                        r"Your video (is being|has been) (uploaded|posted)|Video wird veröffentlicht)", re.I)
 
@@ -132,14 +135,44 @@ def _captcha(page) -> bool:
 
 
 def _dismiss(page) -> None:
-    """Cookie-Banner (optionale ablehnen) und Hinweis-Blasen wegklicken."""
-    try:
-        for b in page.get_by_role("button", name=DISMISS_NAMES).all()[:3]:
-            if b.is_visible():
-                b.click(timeout=2000)
-                time.sleep(0.5)
-    except Exception:
-        pass
+    """Cookie-Banner (optionale ablehnen) und Einführungs-Hinweise („Verstanden“) wegklicken."""
+    for _ in range(4):
+        clicked = False
+        try:
+            for b in page.locator(TUTORIAL_BTN).all()[:2]:
+                if b.is_visible():
+                    b.click(timeout=3000)
+                    clicked = True
+                    time.sleep(0.8)
+                    break
+        except Exception:
+            pass
+        if not clicked:
+            try:
+                for b in page.get_by_role("button", name=DISMISS_NAMES).all()[:3]:
+                    if b.is_visible():
+                        b.click(timeout=3000)
+                        clicked = True
+                        time.sleep(0.8)
+                        break
+            except Exception:
+                pass
+        if not clicked:
+            return
+
+
+def _click(page, loc, tries: int = 4) -> None:
+    """Klicken; liegt ein Hinweis-Overlay darüber, erst wegklicken und nochmal versuchen."""
+    for i in range(tries):
+        try:
+            loc.click(timeout=8000)
+            return
+        except Exception:
+            if i == tries - 1:
+                raise
+            _dismiss(page)
+            page.keyboard.press("Escape")
+            time.sleep(1)
 
 
 def login(timeout_s: int = 900) -> bool:
@@ -198,7 +231,8 @@ def _enabled(btn) -> bool:
 def _type_caption(page, caption: str) -> None:
     editor = page.locator("div[contenteditable='true']").first
     editor.wait_for(state="visible", timeout=120_000)
-    editor.click()
+    _dismiss(page)
+    _click(page, editor)
     page.keyboard.press("ControlOrMeta+A")
     page.keyboard.press("Backspace")
     time.sleep(0.5)
@@ -240,6 +274,7 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
             while time.time() - t0 < 300:  # warten, bis TikTok das Video verarbeitet hat
                 if _captcha(page):
                     raise NeedsHuman("TikTok verlangt eine Sicherheitsabfrage")
+                _dismiss(page)
                 btn = _post_button(page)
                 if btn.count() and _enabled(btn):
                     break
@@ -249,9 +284,10 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
             _dismiss(page)
             _type_caption(page, caption)
             time.sleep(2)
+            _dismiss(page)
             btn = _post_button(page)
             btn.scroll_into_view_if_needed()
-            btn.click()
+            _click(page, btn)
             t0 = time.time()
             while time.time() - t0 < 120:  # ggf. Rückfrage „Jetzt posten“ bestätigen, dann auf Erfolg warten
                 if _captcha(page):
