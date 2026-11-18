@@ -15,6 +15,7 @@ Telegram-Befehle: /status  /pause  /resume  /test <streamer>
 from __future__ import annotations
 
 import collections
+import datetime as dt
 import html
 import json
 import logging
@@ -443,6 +444,7 @@ class Bot:
         self.streams: dict[str, dict] = {}
         self.last_clip: dict[str, float] = {}
         self.noclip: dict[str, float] = {}
+        self.used_clips: set[str] = set()
         self.busy = False
         self.pending_file = STATE / "pending.json"
         self.plock = threading.Lock()
@@ -479,23 +481,67 @@ class Bot:
             f"{st['hype']*100:.0f}% Hype)")
         self.stats["spikes"] += 1
 
+        t_spike = time.time()
+
         def go():
             time.sleep(C["clip_delay_s"])
+            if self.noclip.get(login, 0) > time.time():
+                self.viewer_clip(s, st, chat_lines, force, t_spike)
+                return
             try:
                 clip_id = create_clip(self.ut, s["user_id"])
                 log(f"  Clip angelegt: {clip_id}")
+                self.used_clips.add(clip_id)
                 self.enqueue({"clip_id": clip_id, "stream": s, "stats": st,
-                              "chat": chat_lines, "t": time.time(), "force": force})
+                              "chat": chat_lines, "t": t_spike, "force": force})
             except queue.Full:
                 log("  Warteschlange voll – Moment verworfen")
             except Exception as e:
                 if "403" in str(e):
-                    self.noclip[login] = time.time() + 1800
-                    log(f"  {s['user_name']} erlaubt keine Clips von uns – 30 min übersprungen")
+                    self.noclip[login] = time.time() + 600
+                    log(f"  {s['user_name']} erlaubt keine Clips von uns – 10 min Plan B (Zuschauer-Clips)")
+                    self.viewer_clip(s, st, chat_lines, force, t_spike)
                 else:
                     log(f"  Clip erstellen fehlgeschlagen: {e}")
                     self.stats["errors"] += 1
         threading.Thread(target=go, daemon=True).start()
+
+    # --- Plan B: Zuschauer-Clip abgreifen (Kanal erlaubt keine Clips von uns) ---
+    def viewer_clip(self, s: dict, st: dict, chat_lines, force: bool, t_spike: float) -> None:
+        name = s["user_name"]
+        log(f"  Plan B: warte auf Zuschauer-Clip bei {name}")
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        start = dt.datetime.fromtimestamp(t_spike - 120, tz=dt.timezone.utc).strftime(fmt)
+        time.sleep(60)
+        deadline = t_spike + 1200  # Twitch gibt Zuschauer-Clips oft erst nach 5–20 min heraus
+        while time.time() < deadline:
+            try:
+                end = dt.datetime.now(dt.timezone.utc).strftime(fmt)
+                clips = self.tw.get("clips", broadcaster_id=s["user_id"], started_at=start,
+                                    ended_at=end, first=20)["data"]
+            except Exception as e:
+                log(f"  Plan B Abfrage: {e}")
+                clips = []
+            cands = []
+            for c in clips:
+                try:
+                    created = dt.datetime.strptime(c["created_at"], fmt).replace(tzinfo=dt.timezone.utc).timestamp()
+                except Exception:
+                    continue
+                if c["id"] not in self.used_clips and t_spike - 60 <= created <= t_spike + 180:
+                    cands.append(c)
+            if cands:
+                best = max(cands, key=lambda c: (c["view_count"], c["created_at"]))
+                self.used_clips.add(best["id"])
+                log(f"  Plan B: Zuschauer-Clip von {best.get('creator_name')} gefunden ({best['view_count']} Views)")
+                try:
+                    self.enqueue({"clip_id": best["id"], "stream": s, "stats": st, "chat": chat_lines,
+                                  "t": t_spike, "force": force, "viewer_clip": True})
+                except queue.Full:
+                    log("  Warteschlange voll – Moment verworfen")
+                return
+            time.sleep(60)
+        log(f"  Plan B: kein Zuschauer-Clip bei {name} gefunden")
 
     # --- Worker: Download, Transkript, Bewertung, Render, Telegram ---------
     def _save_pending(self) -> None:
@@ -547,7 +593,8 @@ class Bot:
             hook = re.sub(r"[^\w\s.,!?äöüÄÖÜß'\"-]", "", verdict.get("hook", "")).strip()[:70] \
                 or f"{name} in GTA 6"
             out, info = cb.make_vertical(src, td, hook, f"twitch.tv/{login}", words=words)
-            info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10\n"
+            info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10"
+                        f"{' · 👥 Zuschauer-Clip' if job.get('viewer_clip') else ''}\n"
                         f"📝 {html.escape(verdict.get('reason', ''))}\n"
                         f"💬 Chat {st['factor']:.1f}x · {st['hype']*100:.0f}% Hype · "
                         f"🔴 {s['viewer_count']} live\n"
@@ -586,7 +633,7 @@ class Bot:
             for login, s in self.streams.items():
                 st = spike_stats(self.chat, login, now)
                 rate = f"{st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
-                lock = " – 🚫 Clips gesperrt" if self.noclip.get(login, 0) > now else ""
+                lock = " – 👥 Plan B (Zuschauer-Clips)" if self.noclip.get(login, 0) > now else ""
                 lines.append(f"• {s['user_name']} – {s['viewer_count']} Zuschauer – Chat {rate}{lock}")
             if not self.streams:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
@@ -655,7 +702,7 @@ class Bot:
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
             if not self.paused:
                 for login in list(self.streams):
-                    if now - self.last_clip.get(login, 0) < C["cooldown_s"] or self.noclip.get(login, 0) > now:
+                    if now - self.last_clip.get(login, 0) < C["cooldown_s"]:
                         continue
                     st = spike_stats(self.chat, login, now)
                     if st and triggered(st):
