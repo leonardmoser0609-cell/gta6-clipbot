@@ -403,13 +403,22 @@ def split_crops(face, fw: int, fh: int) -> tuple[tuple, tuple]:
     ar_bot = W / BOT_H
     gh = fh
     gw = min(gh * ar_bot, fw)
-    gx = (fw - gw) / 2
-    cam_l, cam_r = x - fwid * 1.1, x + w + fwid * 1.1   # geschätzter Rand der Facecam-Einblendung
-    if x + w / 2 > fw / 2:
-        gx = max(0, min(gx, cam_l - gw))
+    gx, gy = (fw - gw) / 2, 0
+    small_cam = fwid < fh * 0.075
+    if small_cam and y > fh / 2:
+        # kleine Cam unten: Gameplay nur aus dem Bereich darüber nehmen
+        gh = max(fh * 0.55, y - fwid * 2.5)
+        gw = gh * ar_bot
+        gx = (fw - gw) / 2
     else:
-        gx = min(fw - gw, max(gx, cam_r))
-    return ((_even(cw), _even(ch), _even(cx), _even(cy)), (_even(gw), _even(gh), _even(gx), 0))
+        cam_l, cam_r = x - fwid * 1.6, x + w + fwid * 1.6   # geschätzter Rand der Cam-Einblendung
+        if x + w / 2 > fw / 2:
+            gx = max(0, min(gx, cam_l - gw))
+        else:
+            gx = min(fw - gw, max(gx, cam_r))
+        if not (gx <= fw / 2 <= gx + gw):   # Bildmitte (Spielfigur) muss drin bleiben
+            gx = (fw - gw) / 2
+    return ((_even(cw), _even(ch), _even(cx), _even(cy)), (_even(gw), _even(gh), _even(gx), _even(gy) if gy else 0))
 
 
 def render_short(src: Path, out: Path, dur: float, title: str, maxrate: float = 4.5, face="auto") -> str:
