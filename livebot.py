@@ -509,8 +509,8 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
     return {"score": 0, "reason": f"KI-Antwort unbrauchbar: {text[:120]}", "hook": "", "caption": ""}
 
 
-SUBGIFT_RE = re.compile(r"sub[\s\-]*gift|gift[\s\-]*sub|gifted|giftsub|subs?\s*(verschenkt|geschenkt)|"
-                        r"geschenkte[nr]?\s*subs?", re.I)
+SUBGIFT_RE = re.compile(r"gifts\b|sub[\s\-]*gift|gifted|giftsub|gift[\s\-]*ankündigung|"
+                        r"subs?\s*(verschenkt|geschenkt)|geschenkte[nr]?\s*subs?", re.I)
 
 
 def subgift_moment(words, chat_lines: list[str], verdict: dict) -> str:
