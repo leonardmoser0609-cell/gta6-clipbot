@@ -9,6 +9,10 @@ on:
         description: "Nur anzeigen, nichts senden"
         type: boolean
         default: false
+      game_name:
+        description: "Andere Twitch-Kategorie nur für diesen Lauf (z. B. Grand Theft Auto V zum Testen)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -58,11 +62,11 @@ jobs:
           VIDEO_ZOOM: ${{ vars.VIDEO_ZOOM }}
           NOTIFY_EMPTY: ${{ vars.NOTIFY_EMPTY }}
           HASHTAGS: ${{ vars.HASHTAGS }}
-          GAME_NAME: ${{ vars.GAME_NAME }}
+          GAME_NAME: ${{ inputs.game_name || vars.GAME_NAME }}
         run: python clipbot.py
 
       - name: Verschickte Clips merken
-        if: always()
+        if: always() && !inputs.dry_run
         run: |
           git config user.name "clipbot"
           git config user.email "clipbot@users.noreply.github.com"
