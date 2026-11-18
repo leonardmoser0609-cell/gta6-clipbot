@@ -84,7 +84,7 @@ C = {
     "max_per_hour": _f("MAX_PER_HOUR", 20),
     "min_score": _f("MIN_SCORE", 6),
     "anthropic_key": os.getenv("ANTHROPIC_API_KEY") or "",
-    "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-sonnet-5-5",
+    "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-haiku-5-5",
     "hashtags": os.getenv("HASHTAGS") or "#gta6 #gtavi #gta #twitchclips #gaming #fyp",
     "yt_min_score": _f("YT_MIN_SCORE", 6),
     "yt_max_per_day": _f("YT_MAX_PER_DAY", 60),
@@ -393,7 +393,7 @@ Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
 Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
-Zeigen die Bilder KEIN GTA 6 (z. B. Minecraft oder ein anderes Spiel, nur Just Chatting, Pause-/Ladebildschirm ohne Handlung, Werbung), gib score 0.
+Nur wenn auf den Bildern eindeutig ein ANDERES Spiel (z. B. Minecraft) oder gar kein Spiel zu sehen ist, gib score 0.
 
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was passiert, sachlich>",
@@ -407,7 +407,7 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
-                json={"model": C["anthropic_model"], "max_tokens": 700,
+                json={"model": C["anthropic_model"], "max_tokens": 4000,  # Platz für das Nachdenken des Modells
                       "messages": [{"role": "user", "content": content}]},
                 timeout=90)
             r.raise_for_status()
@@ -415,6 +415,8 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
             log(f"  KI-Bewertung fehlgeschlagen: {str(e)[:200]}")
             return None
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
+        u = r.json().get("usage", {})
+        log(f"  KI ({C['anthropic_model']}): {u.get('input_tokens', 0)} Tokens rein, {u.get('output_tokens', 0)} raus")
         try:
             j = json.loads(text[text.index("{"): text.rindex("}") + 1])
             j["score"] = int(j.get("score", 0))
