@@ -23,6 +23,7 @@ import logging.handlers
 import os
 import queue
 import random
+import shutil
 import re
 import socket
 import subprocess
@@ -87,6 +88,9 @@ C = {
     "hashtags": os.getenv("HASHTAGS") or "#gta6 #gtavi #gta #twitchclips #gaming #fyp",
     "yt_min_score": _f("YT_MIN_SCORE", 6),
     "yt_max_per_day": _f("YT_MAX_PER_DAY", 60),
+    "ig_min_score": _f("IG_MIN_SCORE", 6),
+    "ig_max_seconds": _f("IG_MAX_SECONDS", 49.5),
+    "ig_max_per_day": _f("IG_MAX_PER_DAY", 40),
 }
 
 # ---------------------------------------------------------------------------
@@ -477,6 +481,64 @@ def youtube_upload(path: Path, title: str, description: str, tags: list[str]) ->
 
 
 # ---------------------------------------------------------------------------
+# Instagram-Reels (Konto über die verknüpfte Facebook-Seite)
+# ---------------------------------------------------------------------------
+
+GRAPH = "https://graph.facebook.com/v25.0"
+
+
+def ig_enabled() -> bool:
+    return bool(os.getenv("META_PAGE_TOKEN") and os.getenv("IG_USER_ID"))
+
+
+def ig_trim(src: Path, max_s: float) -> Path:
+    """Instagram-API nimmt bei diesem Konto nur ~50 s: vorne kürzen, das Ende (Höhepunkt) bleibt."""
+    import overlay
+    dur = cb.probe(src)["dur"]
+    if dur <= max_s:
+        return src
+    out = src.with_name(src.stem + "_ig.mp4")
+    subprocess.run([overlay.ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{dur - max_s:.2f}",
+                    "-i", str(src), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", "4.5M",
+                    "-bufsize", "9M", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)],
+                   check=True, timeout=300)
+    return out
+
+
+def instagram_reel(path: Path, caption: str) -> str:
+    ig, token = os.environ["IG_USER_ID"].strip(), os.environ["META_PAGE_TOKEN"].strip()
+    r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={
+        "media_type": "REELS", "caption": caption[:2200], "share_to_feed": "true",
+        "upload_type": "resumable", "access_token": token})
+    if not r.ok:
+        raise RuntimeError(f"Instagram-Container {r.status_code}: {r.text[:250]}")
+    cid = r.json()["id"]
+    uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{GRAPH.rsplit('/', 1)[1]}/{cid}"
+    with open(path, "rb") as f:
+        u = requests.post(uri, data=f, timeout=900, headers={
+            "Authorization": f"OAuth {token}", "offset": "0", "file_size": str(path.stat().st_size),
+            "Content-Type": "application/octet-stream"})
+    if not u.ok:
+        raise RuntimeError(f"Instagram-Upload {u.status_code}: {u.text[:250]}")
+    for _ in range(90):
+        st = requests.get(f"{GRAPH}/{cid}", params={"fields": "status_code,status", "access_token": token},
+                          timeout=30).json()
+        if st.get("status_code") == "FINISHED":
+            break
+        if st.get("status_code") in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"Instagram-Verarbeitung: {str(st)[:250]}")
+        time.sleep(8)
+    else:
+        raise RuntimeError("Instagram-Verarbeitung dauert zu lange")
+    p = requests.post(f"{GRAPH}/{ig}/media_publish", data={"creation_id": cid, "access_token": token}, timeout=60)
+    if not p.ok:
+        raise RuntimeError(f"Instagram-Veröffentlichen {p.status_code}: {p.text[:250]}")
+    mid = p.json()["id"]
+    link = requests.get(f"{GRAPH}/{mid}", params={"fields": "permalink", "access_token": token}, timeout=30)
+    return link.json().get("permalink", mid) if link.ok else mid
+
+
+# ---------------------------------------------------------------------------
 # Verarbeitung eines Moments
 # ---------------------------------------------------------------------------
 
@@ -492,6 +554,9 @@ class Bot:
         self.noclip: dict[str, float] = {}
         self.used_clips: set[str] = set()
         self.yt_on = yt_enabled()
+        self.ig_on = ig_enabled()
+        self.ig_times: collections.deque = collections.deque()
+        self.pub_lock = threading.Lock()
         self.yt_times: collections.deque = collections.deque()
         self.busy = False
         self.pending_file = STATE / "pending.json"
@@ -652,8 +717,15 @@ class Bot:
             self.tg.message("<pre>" + html.escape(verdict["caption"]) + "</pre>", parse_html=True)
             self.sent_times.append(time.time())
             self.stats["sent"] += 1
-            if self.yt_on and verdict["score"] >= C["yt_min_score"]:
-                self.post_youtube(out, verdict, name, login)
+            yt = self.yt_on and verdict["score"] >= C["yt_min_score"]
+            ig = self.ig_on and verdict["score"] >= C["ig_min_score"]
+            if yt or ig:  # Uploads im Hintergrund, damit der nächste Clip nicht wartet
+                outbox = STATE / "outbox"
+                outbox.mkdir(exist_ok=True)
+                keep = outbox / f"{job['clip_id']}.mp4"
+                shutil.copy(out, keep)
+                threading.Thread(target=self.publish, args=(keep, verdict, name, login, yt, ig),
+                                 daemon=True).start()
             log(f"  ✅ an Telegram geschickt ({time.time() - job['t'] + C['clip_delay_s']:.0f}s nach dem Moment)")
 
     def post_youtube(self, out: Path, verdict: dict, name: str, login: str) -> None:
@@ -676,6 +748,37 @@ class Bot:
             log(f"  YouTube-Upload fehlgeschlagen: {e}")
             try:
                 self.tg.message(f"⚠️ YouTube-Upload fehlgeschlagen: {str(e)[:300]}")
+            except Exception:
+                pass
+
+    def publish(self, path: Path, verdict: dict, name: str, login: str, yt: bool, ig: bool) -> None:
+        with self.pub_lock:
+            try:
+                if yt:
+                    self.post_youtube(path, verdict, name, login)
+                if ig:
+                    self.post_instagram(path, verdict)
+            finally:
+                for f in (path, path.with_name(path.stem + "_ig.mp4")):
+                    f.unlink(missing_ok=True)
+
+    def post_instagram(self, out: Path, verdict: dict) -> None:
+        now = time.time()
+        while self.ig_times and self.ig_times[0] < now - 86400:
+            self.ig_times.popleft()
+        if len(self.ig_times) >= C["ig_max_per_day"]:
+            log("  Instagram: Tageslimit erreicht – nicht hochgeladen")
+            return
+        try:
+            url = instagram_reel(ig_trim(out, C["ig_max_seconds"]), verdict.get("caption", ""))
+            self.ig_times.append(time.time())
+            self.stats["instagram"] += 1
+            log(f"  📸 Instagram: {url}")
+            self.tg.message(f"📸 Auf Instagram: {url}")
+        except Exception as e:
+            log(f"  Instagram-Upload fehlgeschlagen: {e}")
+            try:
+                self.tg.message(f"⚠️ Instagram-Upload fehlgeschlagen: {str(e)[:300]}")
             except Exception:
                 pass
 
@@ -712,6 +815,8 @@ class Bot:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
             lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
                          f"heute {len(self.yt_times)} hochgeladen")
+            lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
+                         f"heute {len(self.ig_times)} hochgeladen")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
                          f"{self.stats['rejected']} aussortiert, {self.stats['errors']} Fehler")
             self.tg.message("\n".join(lines))
@@ -721,6 +826,12 @@ class Bot:
             else:
                 self.yt_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"YouTube-Autoupload {'an ▶️' if self.yt_on else 'aus ⏸'}")
+        elif cmd == "/ig":
+            if not ig_enabled():
+                self.tg.message("Instagram ist nicht verbunden.")
+            else:
+                self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
+                self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
         elif cmd == "/pause":
             self.paused = True
             self.tg.message("⏸ Pausiert. Mit /resume geht's weiter.")
@@ -736,12 +847,12 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /yt on|off")
+            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /yt on|off · /ig on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
         log(f"Live-Clipper startet – {C['game']}, Top {C['top_n']} ({C['lang']}), "
-            f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}, YouTube: {'an' if yt_enabled() else 'aus'}")
+            f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}, YouTube: {'an' if yt_enabled() else 'aus'}, Instagram: {'an' if ig_enabled() else 'aus'}")
         self.ut.get()  # ggf. Twitch-Freigabe einholen
         self.chat.start()
         for job in list(self.pending.values()):
