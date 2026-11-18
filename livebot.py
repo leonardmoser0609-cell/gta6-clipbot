@@ -409,6 +409,8 @@ Antworte NUR mit JSON:
             timeout=90)
         r.raise_for_status()
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
+        if "{" not in text:
+            raise RuntimeError(f"keine JSON-Antwort: {text[:200]!r} (stop={r.json().get('stop_reason')})")
         j = json.loads(text[text.index("{"): text.rindex("}") + 1])
         j["score"] = int(j.get("score", 0))
         j["reason"] = j.get("what", "")

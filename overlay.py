@@ -311,19 +311,32 @@ def title_overlay(path: Path, title: str, center_y: int) -> None:
     img.save(path)
 
 
+import threading as _th
+_CV2_LOCK = _th.Lock()
+_CV2_TRIED = [False]
+
+
 def _cv2():
+    """OpenCV laden; fehlt es, einmalig per uv nachinstallieren (max. 3 min)."""
     import importlib
-    try:
-        return importlib.import_module("cv2")
-    except ImportError:  # einmalig nachinstallieren (uv-venv hat kein pip)
-        for cmd in (["uv", "pip", "install", "--python", _sys.executable, "opencv-python-headless"],
-                    [_sys.executable, "-m", "pip", "install", "-q", "opencv-python-headless"]):
+    import shutil
+    with _CV2_LOCK:
+        try:
+            return importlib.import_module("cv2")
+        except ImportError:
+            if _CV2_TRIED[0]:
+                raise
+            _CV2_TRIED[0] = True
+        home = Path.home()
+        uv = shutil.which("uv") or next((str(p) for p in (home / ".local/bin/uv", Path("/opt/homebrew/bin/uv"),
+                                                         home / ".cargo/bin/uv") if p.exists()), None)
+        if uv:
             try:
-                _sp.run(cmd, check=True, timeout=600, capture_output=True)
-                break
+                _sp.run([uv, "pip", "install", "--python", _sys.executable, "opencv-python-headless"],
+                        check=True, timeout=180, capture_output=True)
             except Exception:
-                continue
-    return importlib.import_module("cv2")
+                pass
+        return importlib.import_module("cv2")
 
 
 def detect_facecam(src: Path, dur: float, n: int = 10):
