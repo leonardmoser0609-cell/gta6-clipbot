@@ -832,6 +832,28 @@ class Bot:
             else:
                 self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
+        elif cmd == "/clip":
+            m = re.search(r"(?:clip/|clips\.twitch\.tv/)?([A-Za-z0-9_-]{10,})\s*(\w+)?\s*$", arg.strip())
+            if not m:
+                self.tg.message("So: /clip <Twitch-Clip-Link> [streamer]")
+                return
+            clip_id, login = m.group(1), (m.group(2) or "").lower()
+            lm = re.search(r"twitch\.tv/(\w+)/clip/", arg)
+            login = login or (lm.group(1).lower() if lm else "")
+            try:
+                c = self.tw.get("clips", id=clip_id)["data"]
+                if c:
+                    login = login or c[0]["broadcaster_name"].lower()
+                u = self.tw.get("users", login=login)["data"][0] if login else None
+                live = self.tw.get("streams", user_login=login)["data"] if login else []
+                s = live[0] if live else {"user_id": u["id"], "user_login": u["login"],
+                                          "user_name": u["display_name"], "viewer_count": 0, "title": ""}
+                fake = {"n": 0, "rate": 0, "base": 1, "factor": 0, "hype": 0, "uniq": 0}
+                self.enqueue({"clip_id": clip_id, "stream": s, "stats": fake, "chat": [], "t": time.time(),
+                              "force": True})
+                self.tg.message(f"🎬 Clip von {s['user_name']} eingereiht – kommt in 1–2 Minuten.")
+            except Exception as e:
+                self.tg.message(f"Clip nicht gefunden – bitte so: /clip <Link> <streamer> ({str(e)[:100]})")
         elif cmd == "/pause":
             self.paused = True
             self.tg.message("⏸ Pausiert. Mit /resume geht's weiter.")
@@ -847,7 +869,7 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /yt on|off · /ig on|off")
+            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /yt on|off · /ig on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
@@ -892,6 +914,16 @@ class Bot:
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
+            inject = STATE / "inject.json"
+            if inject.exists():
+                try:
+                    for job in json.loads(inject.read_text()):
+                        job.setdefault("t", time.time())
+                        self.enqueue(job)
+                        log(f"Manueller Clip eingereiht: {job['stream'].get('user_name')} {job['clip_id']}")
+                except Exception as e:
+                    log(f"inject.json: {e}")
+                inject.unlink(missing_ok=True)
             if not self.paused:
                 for login in list(self.streams):
                     if now - self.last_clip.get(login, 0) < C["cooldown_s"]:
