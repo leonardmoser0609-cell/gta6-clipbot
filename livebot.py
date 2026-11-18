@@ -400,7 +400,8 @@ Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
 Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
-{other_game_rule}
+{other_game_rule}Geht es im Moment um Sub-Gifts, Subs, Spenden oder Danksagungen dafür (statt um das Spiel), gib score 0.
+
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was passiert, sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
@@ -432,6 +433,23 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
             log(f"  KI ohne gültiges JSON (Versuch {attempt + 1}): {text[:200]!r}")
     # KI hat geantwortet, aber nichts Brauchbares (oft: kein GTA zu sehen) -> lieber verwerfen
     return {"score": 0, "reason": f"KI-Antwort unbrauchbar: {text[:120]}", "hook": "", "caption": ""}
+
+
+SUBGIFT_RE = re.compile(r"sub[\s\-]*gift|gift[\s\-]*sub|gifted|giftsub|subs?\s*(verschenkt|geschenkt)|"
+                        r"geschenkte[nr]?\s*subs?", re.I)
+
+
+def subgift_moment(words, chat_lines: list[str], verdict: dict) -> str:
+    """Fehlalarm durch Sub-Gifts? Gibt den Grund zurück (leer = kein Sub-Gift-Moment)."""
+    said = " ".join(w[2] for w in words or [])
+    if SUBGIFT_RE.search(said):
+        return "im Gesprochenen"
+    if SUBGIFT_RE.search(" ".join(str(verdict.get(k, "")) for k in ("what", "reason", "hook", "caption"))):
+        return "laut KI-Beschreibung"
+    hits = sum(1 for line in chat_lines if re.search(r"gift", line, re.I))
+    if chat_lines and hits >= max(3, 0.15 * len(chat_lines)):
+        return f"im Chat ({hits} Gift-Nachrichten)"
+    return ""
 
 
 def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
@@ -753,6 +771,11 @@ class Bot:
                 or fallback_judge(name, login, words, st)
             log(f"  Bewertung {verdict['score']}/10 – {verdict.get('reason', '')}")
             if verdict["score"] < C["min_score"] and not job.get("force"):
+                self.stats["rejected"] += 1
+                return
+            why = subgift_moment(words, job["chat"], verdict)
+            if why and not job.get("force"):
+                log(f"  Aussortiert: Sub-Gifts {why} – Fehlalarm, wird nicht gepostet")
                 self.stats["rejected"] += 1
                 return
             now = time.time()
