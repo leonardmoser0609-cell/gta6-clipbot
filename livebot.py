@@ -479,7 +479,7 @@ Aufgabe: Finde heraus, WAS im HÖHEPUNKT konkret passiert (Handlung im Spiel und
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was im Höhepunkt passiert (mit kurzer Vorgeschichte), sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
- "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht eindeutig zu erkennen, was im Höhepunkt passiert, bau den Titel aus dem, was der Streamer dort sagt oder ruft (Zeilen mit »HÖHEPUNKT«), gern als kurzes Zitat, z. B. 'Trymacs: „Wo ist mein Boot hin?!“ in GTA 6 😂'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
+ "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht eindeutig zu erkennen, was im Höhepunkt passiert, leite den Titel aus dem ab, was der Streamer dort sagt oder ruft (Zeilen mit »HÖHEPUNKT«) – aber sinngemäß in eigenen Worten, NIE als wörtliches Zitat (das Transkript ist oft ungenau), z. B. 'Trymacs verliert sein Boot in GTA 6 😂'. Keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
  "caption": "<Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     text = ""
     for attempt in range(2):
@@ -887,7 +887,7 @@ class Bot:
             if len(self.sent_times) >= C["max_per_hour"]:
                 log("  Stundenlimit erreicht – übersprungen")
                 return
-            hook = re.sub(r"#\w+", "", verdict.get("hook", "")).replace("\n", " ").strip()[:90] \
+            hook = re.sub(r"#\w+|[„“”\"‚‘’»«]", "", verdict.get("hook", "")).replace("\n", " ").strip()[:90] \
                 or f"{name} in GTA 6 😂"
             if not verdict.get("caption"):
                 verdict["caption"] = fallback_judge(name, login, words, st)["caption"]
