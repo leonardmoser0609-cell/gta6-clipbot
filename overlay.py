@@ -364,24 +364,26 @@ def detect_facecam(src: Path, dur: float, n: int = 10):
                     dets.append((i, x, y, w, h))
     if not dets:
         return None
-    best, best_n = None, 0
+    need = max(4, n * 0.4)
+    stable = []
     for (i, x, y, w, h) in dets:
         cx, cy = x + w / 2, y + h / 2
-        frames = {j for (j, x2, y2, w2, h2) in dets
-                  if abs(x2 + w2 / 2 - cx) < fw * 0.05 and abs(y2 + h2 / 2 - cy) < fh * 0.06
-                  and 0.6 < w2 / w < 1.6}
-        if len(frames) > best_n or (len(frames) == best_n and best and w > best[3]):
-            best, best_n = (i, x, y, w, h), len(frames)
-    if best_n < max(4, n * 0.4):
+        grp = [(j, x2, y2, w2, h2) for (j, x2, y2, w2, h2) in dets
+               if abs(x2 + w2 / 2 - cx) < fw * 0.05 and abs(y2 + h2 / 2 - cy) < fh * 0.06 and 0.6 < w2 / w < 1.6]
+        if len({g[0] for g in grp}) >= need:
+            stable.append(tuple(sum(g[k] for g in grp) / len(grp) for k in (1, 2, 3, 4)))
+    if not stable:
         return None
-    _, x, y, w, h = best
-    group = [(x2, y2, w2, h2) for (j, x2, y2, w2, h2) in dets
-             if abs(x2 + w2 / 2 - (x + w / 2)) < fw * 0.05 and abs(y2 + h2 / 2 - (y + h / 2)) < fh * 0.06]
-    ax = sum(g[0] for g in group) / len(group)
-    ay = sum(g[1] for g in group) / len(group)
-    aw = sum(g[2] for g in group) / len(group)
-    ah = sum(g[3] for g in group) / len(group)
-    return (ax, ay, aw, ah, fw, fh)
+    # Gesichter nahe beieinander (eine Kamera) zusammenfassen; die größte Gruppe gewinnt
+    main = max(stable, key=lambda b: b[2])
+    near = [b for b in stable if abs((b[0] + b[2] / 2) - (main[0] + main[2] / 2)) < fw * 0.25
+            and abs((b[1] + b[3] / 2) - (main[1] + main[3] / 2)) < fh * 0.25]
+    x0 = min(b[0] for b in near)
+    y0 = min(b[1] for b in near)
+    x1 = max(b[0] + b[2] for b in near)
+    y1 = max(b[1] + b[3] for b in near)
+    fwid = sum(b[2] for b in near) / len(near)
+    return (x0, y0, x1 - x0, y1 - y0, fw, fh, fwid)
 
 
 def _even(v: float) -> int:
@@ -390,8 +392,9 @@ def _even(v: float) -> int:
 
 def split_crops(face, fw: int, fh: int) -> tuple[tuple, tuple]:
     x, y, w, h = face[:4]
+    fwid = face[6] if len(face) > 6 else w
     ar_top = W / TOP_H
-    cw = min(max(w * 3.3, fw * 0.16), fw)
+    cw = min(max(w + fwid * 2.3, fwid * 3.3, fw * 0.16), fw)
     ch = cw / ar_top
     if ch > fh:
         ch, cw = fh, fh * ar_top
@@ -401,6 +404,11 @@ def split_crops(face, fw: int, fh: int) -> tuple[tuple, tuple]:
     gh = fh
     gw = min(gh * ar_bot, fw)
     gx = (fw - gw) / 2
+    cam_l, cam_r = x - fwid * 1.1, x + w + fwid * 1.1   # geschätzter Rand der Facecam-Einblendung
+    if x + w / 2 > fw / 2:
+        gx = max(0, min(gx, cam_l - gw))
+    else:
+        gx = min(fw - gw, max(gx, cam_r))
     return ((_even(cw), _even(ch), _even(cx), _even(cy)), (_even(gw), _even(gh), _even(gx), 0))
 
 
