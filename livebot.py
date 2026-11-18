@@ -393,31 +393,37 @@ Chat-Nachrichten kurz vor dem Clip:
 {chat_txt}
 
 Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/oder Reaktion des Streamers) – aus Bildern, Transkript und Chat zusammen. Erfinde nichts, was nicht erkennbar ist.
+Zeigen die Bilder KEIN GTA 6 (z. B. Minecraft oder ein anderes Spiel, nur Just Chatting, Pause-/Ladebildschirm ohne Handlung, Werbung), gib score 0.
 
-Antworte NUR mit JSON:
+Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was passiert, sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
  "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-8 Wörter, beschreibt konkret das Geschehen mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
  "caption": "<Post-Caption auf Deutsch: 1-2 kurze, lockere Sätze zum Geschehen mit 1-3 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
-    try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": C["anthropic_model"], "max_tokens": 700,
-                  "messages": [{"role": "user", "content": content}]},
-            timeout=90)
-        r.raise_for_status()
+    text = ""
+    for attempt in range(2):
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": C["anthropic_model"], "max_tokens": 700,
+                      "messages": [{"role": "user", "content": content}]},
+                timeout=90)
+            r.raise_for_status()
+        except Exception as e:  # KI nicht erreichbar -> regelbasierter Fallback
+            log(f"  KI-Bewertung fehlgeschlagen: {str(e)[:200]}")
+            return None
         text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        if "{" not in text:
-            raise RuntimeError(f"keine JSON-Antwort: {text[:200]!r} (stop={r.json().get('stop_reason')})")
-        j = json.loads(text[text.index("{"): text.rindex("}") + 1])
-        j["score"] = int(j.get("score", 0))
-        j["reason"] = j.get("what", "")
-        return j
-    except Exception as e:
-        log(f"  KI-Bewertung fehlgeschlagen: {str(e)[:200]}")
-        return None
+        try:
+            j = json.loads(text[text.index("{"): text.rindex("}") + 1])
+            j["score"] = int(j.get("score", 0))
+            j["reason"] = j.get("what", "")
+            return j
+        except Exception:
+            log(f"  KI ohne gültiges JSON (Versuch {attempt + 1}): {text[:200]!r}")
+    # KI hat geantwortet, aber nichts Brauchbares (oft: kein GTA zu sehen) -> lieber verwerfen
+    return {"score": 0, "reason": f"KI-Antwort unbrauchbar: {text[:120]}", "hook": "", "caption": ""}
 
 
 def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
@@ -521,17 +527,22 @@ def instagram_reel(path: Path, caption: str) -> str:
     base = {"media_type": "REELS", "caption": caption[:2200], "share_to_feed": "true", "access_token": token}
     fb_vid = None
     try:
-        r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={**base, "upload_type": "resumable"})
-        if not r.ok:
-            raise RuntimeError(f"Instagram-Container {r.status_code}: {r.text[:250]}")
-        cid = r.json()["id"]
-        uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{GRAPH.rsplit('/', 1)[1]}/{cid}"
-        with open(path, "rb") as f:
-            u = requests.post(uri, data=f, timeout=900, headers={
-                "Authorization": f"OAuth {token}", "offset": "0", "file_size": str(path.stat().st_size),
-                "Content-Type": "application/octet-stream"})
-        if not u.ok:
-            raise RuntimeError(f"Instagram-Upload {u.status_code}: {u.text[:250]}")
+        for attempt in range(3):  # Instagram meldet manchmal kurzzeitig ProcessingFailedError
+            r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={**base, "upload_type": "resumable"})
+            if not r.ok:
+                raise RuntimeError(f"Instagram-Container {r.status_code}: {r.text[:250]}")
+            cid = r.json()["id"]
+            uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{GRAPH.rsplit('/', 1)[1]}/{cid}"
+            with open(path, "rb") as f:
+                u = requests.post(uri, data=f, timeout=900, headers={
+                    "Authorization": f"OAuth {token}", "offset": "0", "file_size": str(path.stat().st_size),
+                    "Content-Type": "application/octet-stream"})
+            if u.ok:
+                break
+            if attempt == 2:
+                raise RuntimeError(f"Instagram-Upload {u.status_code}: {u.text[:250]}")
+            log(f"  Instagram-Upload {u.status_code}, neuer Versuch in {30 * (attempt + 1)}s")
+            time.sleep(30 * (attempt + 1))
     except Exception as e:  # Ersatzweg über ein unsichtbares Facebook-Video
         log(f"  Instagram-Direktupload fehlgeschlagen ({str(e)[:120]}) – Ersatzweg über Facebook")
         src_url, fb_vid = _fb_hidden_video_url(path, token)
@@ -665,6 +676,8 @@ class Bot:
                     created = dt.datetime.strptime(c["created_at"], fmt).replace(tzinfo=dt.timezone.utc).timestamp()
                 except Exception:
                     continue
+                if str(c.get("game_id")) != str(self.game_id):  # z. B. Clip aus altem Minecraft-VOD
+                    continue
                 if c["id"] not in self.used_clips and t_spike - 60 <= created <= t_spike + 180:
                     cands.append(c)
             if cands:
@@ -729,6 +742,8 @@ class Bot:
                 return
             hook = re.sub(r"#\w+", "", verdict.get("hook", "")).replace("\n", " ").strip()[:90] \
                 or f"{name} in GTA 6 😂"
+            if not verdict.get("caption"):
+                verdict["caption"] = fallback_judge(name, login, words, st)["caption"]
             out, info = cb.make_vertical(src, td, hook, words=words)
             info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10"
                         f"{' · 👥 Zuschauer-Clip' if job.get('viewer_clip') else ''}\n"
@@ -937,7 +952,7 @@ class Bot:
                 # Code/Config geändert -> sauber beenden, launchd startet neu
                 changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
                 if changed:
-                    if not self.busy and self.jobs.empty() and not self.pub_lock.locked():
+                    if not self.busy and not self.pub_lock.locked():
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
