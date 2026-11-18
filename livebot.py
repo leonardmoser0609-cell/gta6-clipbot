@@ -60,6 +60,7 @@ def load_env(path: Path) -> None:
 
 load_env(ROOT / ".env")
 import clipbot as cb  # noqa: E402
+import tiktok_web  # noqa: E402
 
 def _f(name, default):
     try:
@@ -91,6 +92,10 @@ C = {
     "ig_min_score": _f("IG_MIN_SCORE", 6),
     "ig_max_seconds": _f("IG_MAX_SECONDS", 49.5),
     "ig_max_per_day": _f("IG_MAX_PER_DAY", 40),
+    "tt_min_score": _f("TT_MIN_SCORE", 7),
+    "tt_max_per_day": _f("TT_MAX_PER_DAY", 12),
+    "tt_gap_min": _f("TT_GAP_MIN", 30),
+    "tt_headless": os.getenv("TT_HEADLESS", "0") == "1",
 }
 
 # ---------------------------------------------------------------------------
@@ -594,6 +599,9 @@ class Bot:
         self.yt_block_until = 0.0  # YouTube-Uploadsperre (Kanal-Tageslimit)
         self.ig_on = ig_enabled()
         self.ig_times: collections.deque = collections.deque()
+        self.tt_on = os.getenv("TIKTOK", "1") != "0"  # wirkt erst nach dem TikTok-Login
+        self.tt_times: collections.deque = collections.deque()
+        self.tt_fail = 0
         self.pub_lock = threading.Lock()
         self.yt_times: collections.deque = collections.deque()
         self.busy = False
@@ -762,12 +770,14 @@ class Bot:
             only = job.get("platforms")  # optional: nur bestimmte Plattformen (z. B. Test)
             yt = self.yt_on and verdict["score"] >= C["yt_min_score"] and (not only or "youtube" in only)
             ig = self.ig_on and verdict["score"] >= C["ig_min_score"] and (not only or "instagram" in only)
-            if yt or ig:  # Uploads im Hintergrund, damit der nächste Clip nicht wartet
+            tt = self.tt_on and tiktok_web.ready() and verdict["score"] >= C["tt_min_score"] \
+                and (not only or "tiktok" in only)
+            if yt or ig or tt:  # Uploads im Hintergrund, damit der nächste Clip nicht wartet
                 outbox = STATE / "outbox"
                 outbox.mkdir(exist_ok=True)
                 keep = outbox / f"{job['clip_id']}.mp4"
                 shutil.copy(out, keep)
-                threading.Thread(target=self.publish, args=(keep, verdict, name, login, yt, ig),
+                threading.Thread(target=self.publish, args=(keep, verdict, name, login, yt, ig, tt),
                                  daemon=True).start()
             log(f"  ✅ an Telegram geschickt ({time.time() - job['t'] + C['clip_delay_s']:.0f}s nach dem Moment)")
 
@@ -808,16 +818,56 @@ class Bot:
             except Exception:
                 pass
 
-    def publish(self, path: Path, verdict: dict, name: str, login: str, yt: bool, ig: bool) -> None:
+    def publish(self, path: Path, verdict: dict, name: str, login: str, yt: bool, ig: bool,
+                tt: bool = False) -> None:
         with self.pub_lock:
             try:
                 if yt:
                     self.post_youtube(path, verdict, name, login)
                 if ig:
                     self.post_instagram(path, verdict)
+                if tt:
+                    self.post_tiktok(path, verdict)
             finally:
                 for f in (path, path.with_name(path.stem + "_ig.mp4")):
                     f.unlink(missing_ok=True)
+
+    def post_tiktok(self, out: Path, verdict: dict) -> None:
+        now = time.time()
+        while self.tt_times and self.tt_times[0] < now - 86400:
+            self.tt_times.popleft()
+        if len(self.tt_times) >= C["tt_max_per_day"]:
+            log("  TikTok: Tageslimit erreicht – nicht gepostet")
+            return
+        if self.tt_times and now - self.tt_times[-1] < C["tt_gap_min"] * 60:
+            log(f"  TikTok: letzter Post vor weniger als {C['tt_gap_min']:.0f} min – diesen ausgelassen")
+            return
+        try:
+            url = tiktok_web.post(out, verdict.get("caption", ""), log=log, headless=C["tt_headless"])
+            self.tt_times.append(time.time())
+            self.tt_fail = 0
+            self.stats["tiktok"] += 1
+            log(f"  🎵 TikTok: {url}")
+            self.tg.message(f"🎵 Auf TikTok: {url}")
+        except tiktok_web.NeedsHuman as e:
+            self.tt_on = False
+            log(f"  TikTok pausiert: {e}")
+            try:
+                self.tg.message(f"⏸ TikTok pausiert: {e}.\nBitte am Mac „TikTok-Login.command“ doppelklicken und im "
+                                "Fenster einloggen bzw. die Abfrage lösen. Danach /tt on schicken.")
+            except Exception:
+                pass
+        except Exception as e:
+            self.tt_fail += 1
+            log(f"  TikTok-Upload fehlgeschlagen: {str(e)[:300]}")
+            msg = f"⚠️ TikTok-Upload fehlgeschlagen: {str(e)[:250]}"
+            if self.tt_fail >= 3:
+                self.tt_on = False
+                msg += "\n⏸ Nach 3 Fehlern in Folge pausiert – mit /tt on wieder einschalten."
+            try:
+                self.tg.message(msg)
+            except Exception:
+                pass
 
     def post_instagram(self, out: Path, verdict: dict) -> None:
         now = time.time()
@@ -874,6 +924,9 @@ class Bot:
                          f"heute {len(self.yt_times)} hochgeladen")
             lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
                          f"heute {len(self.ig_times)} hochgeladen")
+            tt_state = ("an" if self.tt_on else "aus") if tiktok_web.ready() else "nicht eingeloggt"
+            lines.append(f"TikTok-Autoupload: {tt_state} (ab {C['tt_min_score']}/10, max. {C['tt_max_per_day']:.0f}/Tag, "
+                         f"alle {C['tt_gap_min']:.0f} min) · heute {len(self.tt_times)} gepostet")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
                          f"{self.stats['rejected']} aussortiert, {self.stats['errors']} Fehler")
             self.tg.message("\n".join(lines))
@@ -889,6 +942,13 @@ class Bot:
             else:
                 self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
+        elif cmd == "/tt":
+            if not tiktok_web.ready():
+                self.tg.message("TikTok ist noch nicht eingeloggt – am Mac „TikTok-Login.command“ doppelklicken.")
+            else:
+                self.tt_on = arg.strip().lower() not in ("off", "aus", "0")
+                self.tt_fail = 0
+                self.tg.message(f"TikTok-Autoupload {'an 🎵' if self.tt_on else 'aus ⏸'}")
         elif cmd == "/clip":
             m = re.search(r"(?:clip/|clips\.twitch\.tv/)?([A-Za-z0-9_-]{10,})\s*(\w+)?\s*$", arg.strip())
             if not m:
@@ -926,7 +986,7 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /yt on|off · /ig on|off")
+            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /yt on|off · /ig on|off · /tt on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:

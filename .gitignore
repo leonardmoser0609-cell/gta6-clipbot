@@ -5,3 +5,5 @@ __pycache__/
 logs/
 state/twitch_user.json
 test_output/
+state/tiktok_profile/
+logs/tiktok/
