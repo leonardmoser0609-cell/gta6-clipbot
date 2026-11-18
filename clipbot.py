@@ -381,21 +381,15 @@ def render(src: Path, ass: Path, out: Path, layout: dict, maxrate: float = 4.5) 
     subprocess.run(cmd, check=True, timeout=900)
 
 
-def make_vertical(src: Path, workdir: Path, hook: str, credit: str) -> tuple[Path, dict]:
+def make_vertical(src: Path, workdir: Path, hook: str, credit: str, words=None) -> tuple[Path, dict]:
+    import overlay
     info = probe(src)
-    lay = layout_for(info["w"], info["h"], CFG["zoom"])
-    words = transcribe(src)
+    lay = overlay.layout_for(info["w"], info["h"], CFG["zoom"])
+    if words is None:
+        words = transcribe(src)
     log(f"  {len(words)} Wörter erkannt")
-    ass = workdir / "subs.ass"
-    ass.write_text(build_ass(words, info["dur"], lay, hook, credit), encoding="utf-8")
     out = workdir / "out.mp4"
-    render(src, ass, out, lay)
-    # Telegram-Limit 50 MB: notfalls mit niedrigerer Bitrate neu rendern
-    for rate in (3.0, 2.0):
-        if out.stat().st_size <= 48e6:
-            break
-        log(f"  {out.stat().st_size / 1e6:.0f} MB zu groß – rendere mit {rate} Mbit/s neu")
-        render(src, ass, out, lay, maxrate=rate)
+    overlay.render_fit(src, out, words, info["dur"], lay, hook, credit)
     info["words"] = len(words)
     return out, info
 

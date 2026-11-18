@@ -1,5 +1,38 @@
 # GTA 6 Clip-Bot
 
+## Live-Clipper (Hauptmodus, läuft auf dem Mac)
+`livebot.py` beobachtet dauerhaft die **Top 5 deutschen Live-Streams in „Grand Theft Auto VI“**,
+liest deren Chat mit und erkennt Hype-Momente (Chat-Aktivität ein Vielfaches über normal, viel
+KEKW/LUL/WTF). Dann erstellt er **selbst** einen Twitch-Clip, transkribiert ihn, bewertet ihn
+(Claude, falls `ANTHROPIC_API_KEY` gesetzt, sonst regelbasiert), rendert 9:16 mit Untertiteln
+und schickt Video + Caption per Telegram – meist 1–3 Minuten nach dem Moment.
+
+- Einrichtung: `.env` anlegen (siehe unten), dann einmal `bash setup_mac.sh` im Terminal.
+  Danach läuft der Bot als Hintergrunddienst (launchd), startet nach Absturz/Neustart von selbst
+  und verhindert den Ruhezustand. Stoppen: `bash stop.sh`.
+- Beim ersten Start schickt der Bot per Telegram einen Twitch-Freigabe-Link (Recht „Clips erstellen“).
+- Telegram-Befehle: `/status`, `/pause`, `/resume`, `/test <streamer>`
+- Logs: `logs/livebot.log`. Änderungen an `.py`/`.env` lösen automatisch einen Neustart aus.
+
+`.env`:
+```
+TWITCH_CLIENT_ID=…
+TWITCH_CLIENT_SECRET=…
+TELEGRAM_BOT_TOKEN=…
+TELEGRAM_CHAT_ID=…
+# optional
+ANTHROPIC_API_KEY=…        # KI-Bewertung + Caption
+TOP_N=5                    # Anzahl beobachteter Streams
+SPIKE_FACTOR=3.0           # Empfindlichkeit (niedriger = mehr Clips)
+MIN_SCORE=6                # Mindestbewertung 1–10
+COOLDOWN_S=150             # Mindestabstand pro Streamer
+MAX_PER_HOUR=20
+CLIP_DURATION=40
+WHISPER_MODEL=small
+```
+
+## Stündlicher Modus (GitHub Actions, nur noch manuell)
+
 Holt jede Stunde die meistgesehenen Twitch-Clips der Top-10 deutschen GTA-VI-Streamer,
 macht daraus 9:16-Videos mit deutschen Untertiteln (Whisper) und schickt sie per Telegram –
 inklusive kopierfertigem Caption-Text für TikTok und Instagram.
