@@ -591,6 +591,7 @@ class Bot:
         self.noclip: dict[str, float] = {}
         self.used_clips: set[str] = set()
         self.yt_on = yt_enabled()
+        self.yt_block_until = 0.0  # YouTube-Uploadsperre (Kanal-Tageslimit)
         self.ig_on = ig_enabled()
         self.ig_times: collections.deque = collections.deque()
         self.pub_lock = threading.Lock()
@@ -777,6 +778,10 @@ class Bot:
         if len(self.yt_times) >= C["yt_max_per_day"]:
             log("  YouTube: Tageslimit erreicht – nicht hochgeladen")
             return
+        if now < self.yt_block_until:
+            log(f"  YouTube: Upload-Limit des Kanals – nächster Versuch ab "
+                f"{dt.datetime.fromtimestamp(self.yt_block_until).strftime('%H:%M')}")
+            return
         hook = (verdict.get("hook") or f"{name} in GTA 6 😂").strip().rstrip(".")
         title = f"{hook} #gta6 #shorts"
         tags = ["gta 6", "gta6", "gta vi", "gta 6 deutsch", name, "twitch clips", "gaming", "gta 6 highlights"]
@@ -787,7 +792,17 @@ class Bot:
             log(f"  ▶️ YouTube: {url}")
             self.tg.message(f"▶️ Auf YouTube: {url}")
         except Exception as e:
-            log(f"  YouTube-Upload fehlgeschlagen: {e}")
+            if "exceeded the number of videos" in str(e):  # YouTube-Limit pro Kanal und Tag
+                self.yt_block_until = time.time() + 3 * 3600
+                until = dt.datetime.fromtimestamp(self.yt_block_until).strftime("%H:%M")
+                log(f"  YouTube: Upload-Limit des Kanals erreicht – Pause bis {until}")
+                try:
+                    self.tg.message(f"⏸ YouTube hat das Upload-Limit für heute erreicht – nächster Versuch ab {until}. "
+                                    "Instagram und Telegram laufen weiter.")
+                except Exception:
+                    pass
+                return
+            log(f"  YouTube-Upload fehlgeschlagen: {str(e)[:300]}")
             try:
                 self.tg.message(f"⚠️ YouTube-Upload fehlgeschlagen: {str(e)[:300]}")
             except Exception:
