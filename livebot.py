@@ -399,7 +399,7 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was passiert, sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
  "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-8 Wörter, beschreibt konkret das Geschehen mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
- "caption": "<Post-Caption auf Deutsch: 1-2 kurze, lockere Sätze zum Geschehen mit 1-3 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
+ "caption": "<Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     text = ""
     for attempt in range(2):
         try:
