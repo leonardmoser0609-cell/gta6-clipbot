@@ -397,7 +397,7 @@ Aufgabe: Finde heraus, WAS in dem Clip konkret passiert (Handlung im Spiel und/o
 Antworte NUR mit JSON:
 {{"what": "<1 Satz: was passiert, sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
- "hook": "<Titel oben im Video, Deutsch, 3-7 Wörter, beschreibt konkret das Geschehen mit Namen, z. B. 'Trymacs wird von der Polizei verhaftet' oder 'Monte crasht mit dem Jetski in eine Yacht'. Keine Emojis, keine Hashtags, kein Clickbait, das nicht stimmt>",
+ "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-8 Wörter, beschreibt konkret das Geschehen mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
  "caption": "<Post-Caption auf Deutsch: 1-2 kurze, lockere Sätze zum Geschehen mit 1-3 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     try:
         r = requests.post(
@@ -420,16 +420,7 @@ Antworte NUR mit JSON:
 
 def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
     score = min(10, round(2 + st["factor"] * 1.2 + st["hype"] * 3))
-    # kurzen, prägnanten Satz aus dem Transkript als Hook nehmen
-    hook = ""
-    text = " ".join(w[2] for w in words)
-    for sent in re.split(r"(?<=[.!?])\s+", text):
-        s = sent.strip(" .")
-        if 2 <= len(s.split()) <= 7 and ("!" in sent or "?" in sent):
-            hook = s
-            break
-    if not hook:
-        hook = f"{streamer} in GTA 6"
+    hook = f"{streamer} in GTA 6 😂"
     caption = (f"{streamer} in GTA 6 😂🔥\n\n"
                f"{C['hashtags']} #{re.sub(r'[^0-9a-zA-Z_]', '', login)}")
     return {"score": score, "reason": f"Chat {st['factor']:.1f}x, {st['hype']*100:.0f}% Hype",
@@ -703,9 +694,9 @@ class Bot:
             if len(self.sent_times) >= C["max_per_hour"]:
                 log("  Stundenlimit erreicht – übersprungen")
                 return
-            hook = re.sub(r"[^\w\s.,!?äöüÄÖÜß'\"-]", "", verdict.get("hook", "")).strip()[:70] \
-                or f"{name} in GTA 6"
-            out, info = cb.make_vertical(src, td, hook, f"twitch.tv/{login}", words=words)
+            hook = re.sub(r"#\w+", "", verdict.get("hook", "")).replace("\n", " ").strip()[:90] \
+                or f"{name} in GTA 6 😂"
+            out, info = cb.make_vertical(src, td, hook, words=words)
             info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10"
                         f"{' · 👥 Zuschauer-Clip' if job.get('viewer_clip') else ''}\n"
                         f"📝 {html.escape(verdict.get('reason', ''))}\n"
@@ -736,8 +727,8 @@ class Bot:
         if len(self.yt_times) >= C["yt_max_per_day"]:
             log("  YouTube: Tageslimit erreicht – nicht hochgeladen")
             return
-        hook = (verdict.get("hook") or f"{name} in GTA 6").strip().rstrip(".")
-        title = f"{hook} 😂 #gta6 #shorts"
+        hook = (verdict.get("hook") or f"{name} in GTA 6 😂").strip().rstrip(".")
+        title = f"{hook} #gta6 #shorts"
         tags = ["gta 6", "gta6", "gta vi", "gta 6 deutsch", name, "twitch clips", "gaming", "gta 6 highlights"]
         try:
             url = youtube_upload(out, title, verdict.get("caption", ""), tags)
