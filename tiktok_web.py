@@ -26,7 +26,8 @@ _LOCK = threading.Lock()
 CAPTCHA = ("#captcha-verify-container, .captcha_verify_container, .captcha-verify-container, "
            "iframe[src*='captcha'], div[class*='captcha_verify']")
 POST_NAMES = re.compile(r"^\s*(Posten|Post|Veröffentlichen|Publish)\s*$", re.I)
-CONFIRM_NAMES = re.compile(r"^\s*(Jetzt posten|Post now|Trotzdem posten|Post anyway)\s*$", re.I)
+CONFIRM_NAMES = re.compile(r"^\s*(Jetzt (posten|veröffentlichen)|Post now|Publish now|"
+                           r"Trotzdem (posten|veröffentlichen)|Post anyway|Publish anyway)\s*$", re.I)
 DISMISS_NAMES = re.compile(r"^\s*(Optionale Cookies ablehnen|Decline optional cookies|Verstanden|Got it|OK|Last)\s*$",
                            re.I)
 TUTORIAL_BTN = (".tutorial-tooltip button, .react-joyride__tooltip button[data-action='primary'], "
