@@ -498,37 +498,68 @@ def ig_trim(src: Path, max_s: float) -> Path:
     return out
 
 
+def _fb_hidden_video_url(path: Path, token: str) -> tuple[str, str]:
+    """Lädt das Video unveröffentlicht auf die Facebook-Seite und liefert eine öffentliche MP4-Adresse."""
+    page = os.environ["META_PAGE_ID"].strip()
+    with open(path, "rb") as f:
+        r = requests.post(f"https://graph-video.facebook.com/v25.0/{page}/videos", timeout=900,
+                          data={"published": "false", "access_token": token},
+                          files={"source": (path.name, f, "video/mp4")})
+    if not r.ok:
+        raise RuntimeError(f"Facebook-Hilfsupload {r.status_code}: {r.text[:200]}")
+    vid = r.json()["id"]
+    for _ in range(40):
+        q = requests.get(f"{GRAPH}/{vid}", params={"fields": "source", "access_token": token}, timeout=30)
+        if q.ok and q.json().get("source"):
+            return q.json()["source"], vid
+        time.sleep(8)
+    raise RuntimeError("Facebook-Hilfsupload: keine Video-Adresse")
+
+
 def instagram_reel(path: Path, caption: str) -> str:
     ig, token = os.environ["IG_USER_ID"].strip(), os.environ["META_PAGE_TOKEN"].strip()
-    r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={
-        "media_type": "REELS", "caption": caption[:2200], "share_to_feed": "true",
-        "upload_type": "resumable", "access_token": token})
-    if not r.ok:
-        raise RuntimeError(f"Instagram-Container {r.status_code}: {r.text[:250]}")
-    cid = r.json()["id"]
-    uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{GRAPH.rsplit('/', 1)[1]}/{cid}"
-    with open(path, "rb") as f:
-        u = requests.post(uri, data=f, timeout=900, headers={
-            "Authorization": f"OAuth {token}", "offset": "0", "file_size": str(path.stat().st_size),
-            "Content-Type": "application/octet-stream"})
-    if not u.ok:
-        raise RuntimeError(f"Instagram-Upload {u.status_code}: {u.text[:250]}")
-    for _ in range(90):
-        st = requests.get(f"{GRAPH}/{cid}", params={"fields": "status_code,status", "access_token": token},
-                          timeout=30).json()
-        if st.get("status_code") == "FINISHED":
-            break
-        if st.get("status_code") in ("ERROR", "EXPIRED"):
-            raise RuntimeError(f"Instagram-Verarbeitung: {str(st)[:250]}")
-        time.sleep(8)
-    else:
-        raise RuntimeError("Instagram-Verarbeitung dauert zu lange")
-    p = requests.post(f"{GRAPH}/{ig}/media_publish", data={"creation_id": cid, "access_token": token}, timeout=60)
-    if not p.ok:
-        raise RuntimeError(f"Instagram-Veröffentlichen {p.status_code}: {p.text[:250]}")
-    mid = p.json()["id"]
-    link = requests.get(f"{GRAPH}/{mid}", params={"fields": "permalink", "access_token": token}, timeout=30)
-    return link.json().get("permalink", mid) if link.ok else mid
+    base = {"media_type": "REELS", "caption": caption[:2200], "share_to_feed": "true", "access_token": token}
+    fb_vid = None
+    try:
+        r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={**base, "upload_type": "resumable"})
+        if not r.ok:
+            raise RuntimeError(f"Instagram-Container {r.status_code}: {r.text[:250]}")
+        cid = r.json()["id"]
+        uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{GRAPH.rsplit('/', 1)[1]}/{cid}"
+        with open(path, "rb") as f:
+            u = requests.post(uri, data=f, timeout=900, headers={
+                "Authorization": f"OAuth {token}", "offset": "0", "file_size": str(path.stat().st_size),
+                "Content-Type": "application/octet-stream"})
+        if not u.ok:
+            raise RuntimeError(f"Instagram-Upload {u.status_code}: {u.text[:250]}")
+    except Exception as e:  # Ersatzweg über ein unsichtbares Facebook-Video
+        log(f"  Instagram-Direktupload fehlgeschlagen ({str(e)[:120]}) – Ersatzweg über Facebook")
+        src_url, fb_vid = _fb_hidden_video_url(path, token)
+        r = requests.post(f"{GRAPH}/{ig}/media", timeout=120, data={**base, "video_url": src_url})
+        if not r.ok:
+            raise RuntimeError(f"Instagram-Container (Link) {r.status_code}: {r.text[:250]}")
+        cid = r.json()["id"]
+    try:
+        for _ in range(110):
+            st = requests.get(f"{GRAPH}/{cid}", params={"fields": "status_code,status", "access_token": token},
+                              timeout=30).json()
+            if st.get("status_code") == "FINISHED":
+                break
+            if st.get("status_code") in ("ERROR", "EXPIRED"):
+                raise RuntimeError(f"Instagram-Verarbeitung: {str(st)[:250]}")
+            time.sleep(8)
+        else:
+            raise RuntimeError("Instagram-Verarbeitung dauert zu lange")
+        p = requests.post(f"{GRAPH}/{ig}/media_publish", data={"creation_id": cid, "access_token": token},
+                          timeout=60)
+        if not p.ok:
+            raise RuntimeError(f"Instagram-Veröffentlichen {p.status_code}: {p.text[:250]}")
+        mid = p.json()["id"]
+        link = requests.get(f"{GRAPH}/{mid}", params={"fields": "permalink", "access_token": token}, timeout=30)
+        return link.json().get("permalink", mid) if link.ok else mid
+    finally:
+        if fb_vid:  # Hilfsvideo wieder entfernen
+            requests.delete(f"{GRAPH}/{fb_vid}", params={"access_token": token}, timeout=30)
 
 
 # ---------------------------------------------------------------------------
