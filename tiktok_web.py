@@ -36,6 +36,26 @@ class NeedsHuman(RuntimeError):
     """Login fehlt oder TikTok verlangt eine Sicherheitsabfrage – das muss Leo selbst erledigen."""
 
 
+class ProfileBusy(RuntimeError):
+    """Das TikTok-Browserfenster (z. B. vom Login) ist noch offen."""
+
+
+def _profile_busy() -> bool:
+    import os
+    lock = PROFILE / "SingletonLock"
+    try:
+        target = os.readlink(lock)  # "<rechnername>-<pid>"
+    except OSError:
+        return False
+    try:
+        os.kill(int(target.rsplit("-", 1)[1]), 0)
+        return True
+    except (ValueError, IndexError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Installation (Playwright + Chromium)
 # ---------------------------------------------------------------------------
@@ -140,10 +160,9 @@ def login(timeout_s: int = 900) -> bool:
             print("❌ Kein Login erkannt (Zeit abgelaufen).", flush=True)
             return False
         page.goto(UPLOAD_URL, wait_until="domcontentloaded")
-        (PROFILE / ".logged_in").write_text(time.strftime("%Y-%m-%d %H:%M"))
-        print("✅ Eingeloggt – der Bot kann jetzt auf TikTok posten.", flush=True)
+        print("✅ Eingeloggt.", flush=True)
         print("Falls TikTok noch etwas fragt (Sicherheitsabfrage, Hinweise), im Fenster erledigen.\n"
-              "Danach das Browserfenster schließen.", flush=True)
+              "Danach das Browserfenster schließen – erst dann kann der Bot posten.", flush=True)
         t0 = time.time()
         while time.time() - t0 < 600:  # Fenster offen lassen, bis Leo es schließt (max. 10 min)
             try:
@@ -156,6 +175,8 @@ def login(timeout_s: int = 900) -> bool:
             ctx.close()
         except Exception:
             pass
+        (PROFILE / ".logged_in").write_text(time.strftime("%Y-%m-%d %H:%M"))
+        print("✅ Fertig – der Bot postet ab jetzt auf TikTok.", flush=True)
         return True
 
 
@@ -196,6 +217,8 @@ def _type_caption(page, caption: str) -> None:
 
 
 def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
+    if _profile_busy():
+        raise ProfileBusy("das TikTok-Browserfenster ist noch offen")
     from playwright.sync_api import sync_playwright
     with _LOCK, sync_playwright() as p:
         ctx = _launch(p, headless)

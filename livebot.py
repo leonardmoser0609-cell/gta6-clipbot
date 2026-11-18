@@ -849,6 +849,15 @@ class Bot:
             self.stats["tiktok"] += 1
             log(f"  🎵 TikTok: {url}")
             self.tg.message(f"🎵 Auf TikTok: {url}")
+        except tiktok_web.ProfileBusy as e:
+            log(f"  TikTok übersprungen: {e}")
+            if not getattr(self, "_tt_busy_told", False):
+                self._tt_busy_told = True
+                try:
+                    self.tg.message("ℹ️ TikTok wartet: Bitte das TikTok-Browserfenster am Mac schließen, "
+                                    "dann postet der Bot dort automatisch.")
+                except Exception:
+                    pass
         except tiktok_web.NeedsHuman as e:
             self.tt_on = False
             log(f"  TikTok pausiert: {e}")
