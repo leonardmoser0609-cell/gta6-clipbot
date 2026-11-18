@@ -203,17 +203,22 @@ def create_clip(ut: UserToken, broadcaster_id: str, title: str | None = None) ->
     return r.json()["data"][0]["id"]
 
 
-def wait_clip(tw: cb.Twitch, clip_id: str, timeout: float = 45) -> dict:
+def fetch_clip(clip_id: str, dest: Path, timeout: float = 180) -> str:
+    """Wartet, bis Twitch den neuen Clip verarbeitet hat, und lädt ihn herunter."""
+    url = f"https://clips.twitch.tv/{clip_id}"
     t0 = time.time()
+    time.sleep(15)
+    last = ""
     while time.time() - t0 < timeout:
-        time.sleep(4)
         try:
-            d = tw.get("clips", id=clip_id)["data"]
-            if d:
-                return d[0]
+            cb.download_clip(url, dest)
+            if dest.exists() and dest.stat().st_size > 50_000:
+                log(f"  Clip geladen nach {time.time() - t0:.0f}s")
+                return url
         except Exception as e:
-            log(f"  Clip-Abfrage: {e}")
-    raise RuntimeError("Clip wurde von Twitch nicht fertiggestellt")
+            last = str(e)[-160:]
+        time.sleep(6)
+    raise RuntimeError(f"Clip nicht abrufbar ({last})")
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +415,7 @@ class Bot:
         self.jobs: queue.Queue = queue.Queue(maxsize=6)
         self.streams: dict[str, dict] = {}
         self.last_clip: dict[str, float] = {}
+        self.noclip: dict[str, float] = {}
         self.sent_times: collections.deque = collections.deque()
         self.paused = False
         self.stats = collections.Counter()
@@ -449,8 +455,12 @@ class Bot:
             except queue.Full:
                 log("  Warteschlange voll – Moment verworfen")
             except Exception as e:
-                log(f"  Clip erstellen fehlgeschlagen: {e}")
-                self.stats["errors"] += 1
+                if "403" in str(e):
+                    self.noclip[login] = time.time() + 1800
+                    log(f"  {s['user_name']} erlaubt keine Clips von uns – 30 min übersprungen")
+                else:
+                    log(f"  Clip erstellen fehlgeschlagen: {e}")
+                    self.stats["errors"] += 1
         threading.Thread(target=go, daemon=True).start()
 
     # --- Worker: Download, Transkript, Bewertung, Render, Telegram ---------
@@ -466,11 +476,10 @@ class Bot:
     def process(self, job: dict) -> None:
         s, st = job["stream"], job["stats"]
         login, name = s["user_login"], s["user_name"]
-        clip = wait_clip(self.tw, job["clip_id"])
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             src = td / "clip.mp4"
-            cb.download_clip(clip["url"], src)
+            clip_url = fetch_clip(job["clip_id"], src)
             words = cb.transcribe(src)
             verdict = ai_judge(name, words, job["chat"], st, s.get("title", "")) \
                 or fallback_judge(name, login, words, st)
@@ -491,7 +500,7 @@ class Bot:
                         f"💬 Chat {st['factor']:.1f}x · {st['hype']*100:.0f}% Hype · "
                         f"🔴 {s['viewer_count']} live\n"
                         f"⏱ {round(info['dur'])}s · fertig nach {round(time.time() - job['t'] + C['clip_delay_s'])}s\n"
-                        f"🔗 {html.escape(clip['url'])}")
+                        f"🔗 {html.escape(clip_url)}")
             self.tg.video(out, info_cap, cb.W, cb.H, info["dur"])
             self.tg.message("<pre>" + html.escape(verdict["caption"]) + "</pre>", parse_html=True)
             self.sent_times.append(time.time())
@@ -525,7 +534,8 @@ class Bot:
             for login, s in self.streams.items():
                 st = spike_stats(self.chat, login, now)
                 rate = f"{st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
-                lines.append(f"• {s['user_name']} – {s['viewer_count']} Zuschauer – Chat {rate}")
+                lock = " – 🚫 Clips gesperrt" if self.noclip.get(login, 0) > now else ""
+                lines.append(f"• {s['user_name']} – {s['viewer_count']} Zuschauer – Chat {rate}{lock}")
             if not self.streams:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
@@ -577,7 +587,7 @@ class Bot:
                         os._exit(3)
             if not self.paused:
                 for login in list(self.streams):
-                    if now - self.last_clip.get(login, 0) < C["cooldown_s"]:
+                    if now - self.last_clip.get(login, 0) < C["cooldown_s"] or self.noclip.get(login, 0) > now:
                         continue
                     st = spike_stats(self.chat, login, now)
                     if st and triggered(st):
