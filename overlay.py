@@ -330,7 +330,15 @@ def detect_facecam(src: Path, dur: float, n: int = 10):
     """Findet die Facecam: ein Gesicht, das über den Clip hinweg an derselben Stelle bleibt.
     Rückgabe (x, y, w, h, frame_w, frame_h) des Gesichts oder None."""
     cv2 = _cv2()
-    casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    yunet = ROOT / "models" / "face_detection_yunet_2023mar.onnx"
+    det_yn = None
+    casc = None
+    if yunet.exists() and hasattr(cv2, "FaceDetectorYN"):
+        det_yn = cv2.FaceDetectorYN.create(str(yunet), "", (320, 320), 0.75, 0.3, 50)
+    elif hasattr(cv2, "CascadeClassifier"):
+        casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    else:
+        return None
     dets, fw, fh = [], 0, 0
     with _tf.TemporaryDirectory() as td:
         for i in range(n):
@@ -342,10 +350,18 @@ def detect_facecam(src: Path, dur: float, n: int = 10):
             if img is None:
                 continue
             fh, fw = img.shape[:2]
-            gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-            m = int(fh * 0.06)
-            for (x, y, w, h) in casc.detectMultiScale(gray, 1.1, 6, minSize=(m, m)):
-                dets.append((i, x, y, w, h))
+            m = fh * 0.05
+            if det_yn is not None:
+                det_yn.setInputSize((fw, fh))
+                _, faces = det_yn.detect(img)
+                for f in (faces if faces is not None else []):
+                    x, y, w, h = (float(v) for v in f[:4])
+                    if w >= m:
+                        dets.append((i, x, y, w, h))
+            else:
+                gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+                for (x, y, w, h) in casc.detectMultiScale(gray, 1.1, 6, minSize=(int(m), int(m))):
+                    dets.append((i, x, y, w, h))
     if not dets:
         return None
     best, best_n = None, 0
