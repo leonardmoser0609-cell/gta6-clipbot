@@ -363,7 +363,7 @@ def ff_path(p: Path) -> str:
     return str(p).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
 
 
-def render(src: Path, ass: Path, out: Path, layout: dict) -> None:
+def render(src: Path, ass: Path, out: Path, layout: dict, maxrate: float = 4.5) -> None:
     fg_w = layout["fg_w"]
     crop = f",crop={W}:ih" if fg_w > W else ""
     vf = (
@@ -376,7 +376,7 @@ def render(src: Path, ass: Path, out: Path, layout: dict) -> None:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
            "-filter_complex", vf, "-map", "[v]", "-map", "0:a?",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-           "-maxrate", "6M", "-bufsize", "12M", "-profile:v", "high",
+           "-maxrate", f"{maxrate}M", "-bufsize", f"{maxrate * 2}M", "-profile:v", "high",
            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
     subprocess.run(cmd, check=True, timeout=900)
 
@@ -390,6 +390,12 @@ def make_vertical(src: Path, workdir: Path, hook: str, credit: str) -> tuple[Pat
     ass.write_text(build_ass(words, info["dur"], lay, hook, credit), encoding="utf-8")
     out = workdir / "out.mp4"
     render(src, ass, out, lay)
+    # Telegram-Limit 50 MB: notfalls mit niedrigerer Bitrate neu rendern
+    for rate in (3.0, 2.0):
+        if out.stat().st_size <= 48e6:
+            break
+        log(f"  {out.stat().st_size / 1e6:.0f} MB zu groß – rendere mit {rate} Mbit/s neu")
+        render(src, ass, out, lay, maxrate=rate)
     info["words"] = len(words)
     return out, info
 
