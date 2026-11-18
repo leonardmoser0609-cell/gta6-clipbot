@@ -1,0 +1,4 @@
+__pycache__/
+test_output/
+*.mp4
+.env
