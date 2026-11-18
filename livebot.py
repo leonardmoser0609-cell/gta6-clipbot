@@ -526,6 +526,35 @@ def subgift_moment(words, chat_lines: list[str], verdict: dict) -> str:
     return ""
 
 
+def recent_activity(minutes: int = 10) -> dict:
+    """Zählt aus dem Log (übersteht Neustarts): Momente, erstellte Clips, geschnittene, aussortierte."""
+    since = (dt.datetime.now() - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    out = {"moments": 0, "clips": 0, "cut": 0, "rejected": 0}
+    try:
+        with open(LOGS / "livebot.log", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 400_000))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return out
+    for line in tail:
+        if line[:19] < since:
+            continue
+        if "⚡ Spike bei" in line:
+            out["moments"] += 1
+        elif "Clip angelegt:" in line or "Plan B: Zuschauer-Clip von" in line or "Manueller Clip eingereiht" in line:
+            out["clips"] += 1
+        elif "✅ an Telegram geschickt" in line:
+            out["cut"] += 1
+        elif "Aussortiert:" in line:
+            out["rejected"] += 1
+        else:
+            m = re.search(r"Bewertung (\d+)/10", line)
+            if m and int(m.group(1)) < C["min_score"]:
+                out["rejected"] += 1
+    return out
+
+
 def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
     score = min(10, round(2 + st["factor"] * 1.2 + st["hype"] * 3))
     hook = f"{streamer} in GTA 6 😂"
@@ -1044,7 +1073,12 @@ class Bot:
                     lines.append(f"{i}. ▫️ {s['user_name']} – {viewers}")
             if not self.top_list:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
+            a = recent_activity(10)
+            work = self.jobs.qsize() + (1 if self.busy else 0)
             lines.append("")
+            lines.append(f"⏱ Letzte 10 min: {a['moments']} Momente erkannt · {a['clips']} Clips erstellt · "
+                         f"{a['cut']} geschnitten & geschickt · {a['rejected']} aussortiert"
+                         f"{f' · {work} in Arbeit' if work else ''}")
             lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
                          f"heute {len(self.yt_times)} hochgeladen")
             lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
