@@ -592,6 +592,12 @@ class Bot:
         self.chat = Chat()
         self.jobs: queue.Queue = queue.Queue(maxsize=6)
         self.streams: dict[str, dict] = {}
+        self.top_list: list[dict] = []  # Top 10 live (für /status)
+        self.refresh_now = False
+        try:  # per /erweitere gesetzte Anzahl überlebt Neustarts
+            C["top_n"] = int(json.loads((STATE / "top_n.json").read_text())["top_n"])
+        except Exception:
+            pass
         self.last_clip: dict[str, float] = {}
         self.noclip: dict[str, float] = {}
         self.used_clips: set[str] = set()
@@ -622,7 +628,9 @@ class Bot:
         if time.time() - self.app_token_born > 3 * 24 * 3600:  # App-Token erneuern
             self.tw = cb.Twitch(CID, SECRET)
             self.app_token_born = time.time()
-        top = self.tw.top_streams(self.game_id, C["lang"], C["top_n"])
+        n = int(C["top_n"])
+        self.top_list = self.tw.top_streams(self.game_id, C["lang"], max(10, n))
+        top = self.top_list[:n]
         new = {s["user_login"].lower(): s for s in top}
         if set(new) != set(self.streams):
             log("Top-Streams: " + (", ".join(f"{s['user_name']} ({s['viewer_count']})" for s in top) or "keine"))
@@ -922,21 +930,31 @@ class Bot:
         cmd = cmd.lower().split("@")[0]
         if cmd == "/status":
             now = time.time()
-            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · Kategorie: {C['game']}"]
-            for login, s in self.streams.items():
-                st = spike_stats(self.chat, login, now)
-                rate = f"{st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
-                lock = " – 👥 Plan B (Zuschauer-Clips)" if self.noclip.get(login, 0) > now else ""
-                lines.append(f"• {s['user_name']} – {s['viewer_count']} Zuschauer – Chat {rate}{lock}")
-            if not self.streams:
+            n = int(C["top_n"])
+            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · {C['game']} · geclippt wird Top {n} "
+                     f"(ändern: /erweitere 6)"]
+            for i, s in enumerate(self.top_list[:max(10, n)], 1):
+                login = s["user_login"].lower()
+                viewers = f"{s['viewer_count']:,}".replace(",", ".")
+                if login in self.streams:
+                    st = spike_stats(self.chat, login, now)
+                    rate = f"Chat {st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
+                    lock = " · 👥 Plan B" if self.noclip.get(login, 0) > now else ""
+                    lines.append(f"{i}. 👁 {s['user_name']} – {viewers} – {rate}{lock}")
+                else:
+                    lines.append(f"{i}. ▫️ {s['user_name']} – {viewers}")
+            if not self.top_list:
                 lines.append("Gerade keine deutschen GTA-VI-Streams live.")
+            lines.append("")
             lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
                          f"heute {len(self.yt_times)} hochgeladen")
             lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
                          f"heute {len(self.ig_times)} hochgeladen")
             tt_state = ("an" if self.tt_on else "aus") if tiktok_web.ready() else "nicht eingeloggt"
-            lines.append(f"TikTok-Autoupload: {tt_state} (ab {C['tt_min_score']}/10, max. {C['tt_max_per_day']:.0f}/Tag, "
-                         f"alle {C['tt_gap_min']:.0f} min) · heute {len(self.tt_times)} gepostet")
+            tt_lim = "" if C["tt_max_per_day"] >= 1000 else f", max. {C['tt_max_per_day']:.0f}/Tag"
+            tt_gap = f", alle {C['tt_gap_min']:.0f} min" if C["tt_gap_min"] else ""
+            lines.append(f"TikTok-Autoupload: {tt_state} (ab {C['tt_min_score']}/10{tt_lim}{tt_gap}) · "
+                         f"heute {len(self.tt_times)} gepostet")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
                          f"{self.stats['rejected']} aussortiert, {self.stats['errors']} Fehler")
             self.tg.message("\n".join(lines))
@@ -952,6 +970,20 @@ class Bot:
             else:
                 self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
+        elif cmd in ("/erweitere", "/erweitern", "/top"):
+            try:
+                n = int(arg.strip())
+                assert 1 <= n <= 20
+            except Exception:
+                self.tg.message(f"So: /erweitere 7 (Zahl 1–20). Gerade: Top {int(C['top_n'])}.")
+                return
+            C["top_n"] = n
+            (STATE / "top_n.json").write_text(json.dumps({"top_n": n}))
+            self.refresh_now = True
+            names = ", ".join(s["user_name"] for s in self.top_list[:n]) or "–"
+            self.tg.message(f"👁 Geclippt wird jetzt Top {n}: {names}\n"
+                            "Neue Kanäle brauchen ca. 90 s, bis der Chat-Normalwert gelernt ist.")
+            log(f"Top-N per Telegram auf {n} gesetzt")
         elif cmd == "/tt":
             if not tiktok_web.ready():
                 self.tg.message("TikTok ist noch nicht eingeloggt – am Mac „TikTok-Login.command“ doppelklicken.")
@@ -996,7 +1028,7 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /yt on|off · /ig on|off · /tt on|off")
+            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
@@ -1030,7 +1062,8 @@ class Bot:
         last_refresh = 0.0
         while True:
             now = time.time()
-            if now - last_refresh > C["refresh_s"]:
+            if now - last_refresh > C["refresh_s"] or self.refresh_now:
+                self.refresh_now = False
                 try:
                     self.refresh_streams()
                 except Exception as e:
