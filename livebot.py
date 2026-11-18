@@ -365,7 +365,7 @@ Antworte NUR mit JSON:
 {{"score": <1-10, wie viral/unterhaltsam für Leute, die den Streamer nicht kennen>,
  "reason": "<max. 12 Wörter>",
  "hook": "<Text oben im Video, Deutsch, max. 7 Wörter, neugierig machend, KEINE Emojis>",
- "caption": "<Post-Caption auf Deutsch: 1-2 kurze Sätze mit 1-3 Emojis, dann Zeile 'Credit: twitch.tv/{streamer.lower()}', dann 5-7 Hashtags inkl. #gta6>"}}"""
+ "caption": "<Post-Caption auf Deutsch: 1-2 kurze Sätze mit 1-3 Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6. KEIN Credit, KEIN Link>"}}"""
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -396,7 +396,7 @@ def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
             break
     if not hook:
         hook = f"{streamer} in GTA 6"
-    caption = (f"{streamer} in GTA 6 😂🔥\n\nCredit: twitch.tv/{login}\n\n"
+    caption = (f"{streamer} in GTA 6 😂🔥\n\n"
                f"{C['hashtags']} #{re.sub(r'[^0-9a-zA-Z_]', '', login)}")
     return {"score": score, "reason": f"Chat {st['factor']:.1f}x, {st['hype']*100:.0f}% Hype",
             "hook": hook, "caption": caption}

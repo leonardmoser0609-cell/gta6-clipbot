@@ -436,7 +436,7 @@ class Telegram:
 def post_text(clip: dict, hook: str) -> str:
     login = clip["_stream"]["user_login"]
     tag = "#" + re.sub(r"\W", "", login)
-    return f"{hook} 😂\n\n🎥 Credit: twitch.tv/{login}\n\n{CFG['hashtags']} {tag}"
+    return f"{hook} 😂\n\n{CFG['hashtags']} {tag}"
 
 
 def info_caption(clip: dict, rank: int, total: int) -> str:
