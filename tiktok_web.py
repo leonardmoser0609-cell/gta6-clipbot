@@ -22,6 +22,7 @@ PROFILE = ROOT / "state" / "tiktok_profile"
 DEBUG = ROOT / "logs" / "tiktok"
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=webapp"
 _LOCK = threading.Lock()
+_LAST_LINK = ""  # zuletzt gemeldeter Video-Link (nicht doppelt melden)
 
 CAPTCHA = ("#captcha-verify-container, .captcha_verify_container, .captcha-verify-container, "
            "iframe[src*='captcha'], div[class*='captcha_verify']")
@@ -316,16 +317,26 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
                 time.sleep(2)
             else:
                 raise RuntimeError("keine Bestätigung von TikTok nach dem Posten")
-            time.sleep(4)
+            global _LAST_LINK
             link = ""
-            try:
-                a = page.locator("a[href*='/video/']").first
-                if a.count():
-                    link = a.get_attribute("href") or ""
-                    if link.startswith("/"):
-                        link = "https://www.tiktok.com" + link
-            except Exception:
-                pass
+            for _ in range(4):  # neues Video taucht in der Liste manchmal erst nach ein paar Sekunden auf
+                time.sleep(5)
+                try:
+                    a = page.locator("a[href*='/video/']").first
+                    href = (a.get_attribute("href") or "") if a.count() else ""
+                    if href.startswith("/"):
+                        href = "https://www.tiktok.com" + href
+                except Exception:
+                    href = ""
+                if href and href != _LAST_LINK:
+                    link = href
+                    break
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    pass
+            if link:
+                _LAST_LINK = link
             return link or "gepostet (Link in TikTok Studio)"
         except Exception:
             shot = _dump(page, "fehler")
