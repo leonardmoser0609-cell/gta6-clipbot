@@ -61,6 +61,7 @@ def load_env(path: Path) -> None:
 load_env(ROOT / ".env")
 import clipbot as cb  # noqa: E402
 import tiktok_web  # noqa: E402
+import selection as sel  # noqa: E402
 
 def _f(name, default):
     try:
@@ -96,7 +97,51 @@ C = {
     "tt_max_per_day": _f("TT_MAX_PER_DAY", 12),
     "tt_gap_min": _f("TT_GAP_MIN", 30),
     "tt_headless": os.getenv("TT_HEADLESS", "1") == "1",  # TikTok-Upload unsichtbar im Hintergrund
+    # Top-10-Auswahl statt Sofort-Posten
+    "mode": (os.getenv("MODE") or "digest").lower(),       # digest = Top-10-Listen, live = alter Sofort-Modus
+    "digest_hours": [int(h) for h in (os.getenv("DIGEST_HOURS") or "10,15,20,23").split(",") if h.strip()],
+    "deep_model": os.getenv("DEEP_MODEL") or "claude-opus-5-5",
+    "deep_n": _f("DEEP_N", 12),                            # so viele Kandidaten prüft das starke Modell genau
+    "push_gap_min": _f("PUSH_GAP_MIN", 90),
+    "day_budget": _f("AI_DAY_BUDGET", 13.0),               # USD/Tag: darüber Vorauswahl mit Haiku
+    "cycle_budget": _f("AI_CYCLE_BUDGET", 97.0),           # USD seit cycle_start: darüber alles mit Haiku
+    "cycle_start": os.getenv("AI_CYCLE_START") or dt.date.today().isoformat(),
+    "stage1_until": os.getenv("STAGE1_MODEL_UNTIL") or "",  # danach Vorauswahl wieder mit Haiku
 }
+CHEAP_MODEL = "claude-haiku-5-5"
+
+
+def stage1_model() -> str:
+    m = C["anthropic_model"]
+    if C["stage1_until"] and dt.date.today().isoformat() > C["stage1_until"]:
+        m = CHEAP_MODEL
+    if sel.cost_since(C["cycle_start"]) >= C["cycle_budget"] or sel.cost_today() >= C["day_budget"]:
+        m = CHEAP_MODEL
+    return m
+
+
+def deep_model() -> str:
+    return CHEAP_MODEL if sel.cost_since(C["cycle_start"]) >= C["cycle_budget"] else C["deep_model"]
+
+
+def claude_call(model: str, content, max_tokens: int = 8000, timeout: int = 180) -> str:
+    """Eine Anfrage an Claude; schreibt Tokens und Kosten mit. Wirft bei HTTP-Fehlern."""
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": content}]},
+        timeout=timeout)
+    r.raise_for_status()
+    j = r.json()
+    u = j.get("usage", {})
+    usd = sel.add_cost(model, u)
+    log(f"  KI ({model}): {u.get('input_tokens', 0)} Tokens rein, {u.get('output_tokens', 0)} raus · {usd*100:.2f} ct")
+    return "".join(b.get("text", "") for b in j.get("content", []))
+
+
+def parse_json(text: str) -> dict:
+    return json.loads(text[text.index("{"): text.rindex("}") + 1])
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -482,24 +527,15 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
  "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht eindeutig zu erkennen, was im Höhepunkt passiert, leite den Titel aus dem ab, was der Streamer dort sagt oder ruft (Zeilen mit »HÖHEPUNKT«) – aber sinngemäß in eigenen Worten, NIE als wörtliches Zitat (das Transkript ist oft ungenau), z. B. 'Trymacs verliert sein Boot in GTA 6 😂'. Keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
  "caption": "<Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
     text = ""
+    model = stage1_model()
     for attempt in range(2):
         try:
-            r = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": C["anthropic_key"], "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": C["anthropic_model"], "max_tokens": 4000,  # Platz für das Nachdenken des Modells
-                      "messages": [{"role": "user", "content": content}]},
-                timeout=90)
-            r.raise_for_status()
+            text = claude_call(model, content, max_tokens=8000, timeout=120)
         except Exception as e:  # KI nicht erreichbar -> regelbasierter Fallback
             log(f"  KI-Bewertung fehlgeschlagen: {str(e)[:200]}")
             return None
-        text = "".join(b.get("text", "") for b in r.json().get("content", []))
-        u = r.json().get("usage", {})
-        log(f"  KI ({C['anthropic_model']}): {u.get('input_tokens', 0)} Tokens rein, {u.get('output_tokens', 0)} raus")
         try:
-            j = json.loads(text[text.index("{"): text.rindex("}") + 1])
+            j = parse_json(text)
             j["score"] = int(j.get("score", 0))
             j["reason"] = j.get("what", "")
             return j
@@ -507,6 +543,112 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
             log(f"  KI ohne gültiges JSON (Versuch {attempt + 1}): {text[:200]!r}")
     # KI hat geantwortet, aber nichts Brauchbares (oft: kein GTA zu sehen) -> lieber verwerfen
     return {"score": 0, "reason": f"KI-Antwort unbrauchbar: {text[:120]}", "hook": "", "caption": ""}
+
+
+HOOK_RULES = ("Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den "
+              "Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt "
+              "Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht "
+              "eindeutig zu erkennen, was passiert, leite ihn sinngemäß aus dem Gesagten im Höhepunkt ab – NIE als "
+              "wörtliches Zitat, keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist. Keine "
+              "Hashtags, kein Clickbait, das nicht stimmt")
+CAPTION_RULES = ("Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 "
+                 "passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, "
+                 "KEIN Credit")
+
+
+def clean_hook(hook: str | None, name: str) -> str:
+    return re.sub(r"#\w+|[„“”\"‚‘’»«]", "", hook or "").replace("\n", " ").strip()[:90] or f"{name} in GTA 6 😂"
+
+
+def deep_review(c: dict, model: str) -> dict | None:
+    """Genaue Prüfung eines Kandidaten: 16 Bilder (4 Vorgeschichte, 12 dicht um den Höhepunkt), Transkript, Chat."""
+    src, dur = sel.LIB / f"{c['clip_id']}.mp4", float(c["dur"])
+    if not src.exists():
+        return None
+    peak, clear = find_climax(src, dur)
+    w0, w1 = (max(0.0, peak - 7), min(dur, peak + 4)) if clear else (max(0.0, dur - 14), dur)
+    ctx_end = max(1.0, w0 - 0.5)
+    times = [ctx_end * f for f in (0.12, 0.37, 0.62, 0.87)] + [w0 + (w1 - w0) * (i + 0.5) / 12 for i in range(12)]
+    times = [min(max(0.2, t), max(0.2, dur - 0.2)) for t in times]
+    words = [tuple(w) for w in c.get("words", [])]
+    transcript = transcript_lines(words, (w0, w1), limit=5000) or "(keine Sprache erkannt)"
+    content: list[dict] = []
+    for i, (t, b64) in enumerate(extract_frames(src, dur, times=times)):
+        content.append({"type": "text", "text": f"Bild bei {t:.1f}s ({'Vorgeschichte' if i < 4 else 'HÖHEPUNKT'}):"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+    st = c.get("stats", {})
+    peak_txt = (f"ca. Sekunde {peak:.0f} (lauteste Stelle)" if clear
+                else f"Sekunde {w0:.0f}–{w1:.0f} (keine eindeutig laute Stelle)")
+    chat_txt = "\n".join(c.get("chat", [])[-60:])[:3000] or "(nicht verfügbar)"
+    content.append({"type": "text", "text": f"""Du bist Redakteur eines deutschen GTA-6-Clip-Kanals (YouTube Shorts, Instagram Reels, TikTok).
+Oben: 16 Bilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {c['name']} – 4 aus der Vorgeschichte, 12 dicht um den Höhepunkt ({peak_txt}).
+
+Stream-Titel: {c.get('stream_title', '')}
+Chat-Reaktion: {st.get('factor', 0):.1f}x so viel wie normal, {st.get('hype', 0)*100:.0f}% Hype-Nachrichten, {c.get('viewers', 0)} Zuschauer live
+Transkript (automatisch, oft ungenau; »HÖHEPUNKT« = gesagt im Höhepunkt):
+{transcript}
+
+Chat kurz vor dem Clip:
+{chat_txt}
+
+Aufgabe:
+1. Was passiert im Höhepunkt genau (Spielgeschehen und Reaktion des Streamers)? Erfinde nichts.
+2. Wie gut ist der Clip als Short für Leute, die den Streamer NICHT kennen? Bewerte streng:
+   9-10 = sofort verständlich, richtig lustig/krass/absurd, starke Reaktion, Höhepunkt vollständig drin
+   7-8 = klar unterhaltsam   5-6 = okay, braucht Kontext   0-4 = langweilig, unverständlich, Menü/Ladebildschirm/Cutscene ohne Reaktion, Werbung
+   Abzug, wenn der Höhepunkt am Ende abgeschnitten ist. Sub-Gifts, Spenden oder Danksagungen statt Spielgeschehen = 0.
+
+Antworte NUR mit JSON:
+{{"what": "<1-2 Sätze, sachlich>", "score": <0-10>, "why": "<1 kurzer Satz, warum der Clip zieht oder nicht>",
+ "hook": "<{HOOK_RULES}>",
+ "caption": "<{CAPTION_RULES}>"}}"""})
+    for attempt in range(2):
+        try:
+            j = parse_json(claude_call(model, content, max_tokens=10000, timeout=240))
+            j["score"] = int(j.get("score", 0))
+            return j
+        except Exception as e:
+            log(f"  Genaue Prüfung {c['clip_id'][:20]} fehlgeschlagen (Versuch {attempt + 1}): {str(e)[:150]}")
+    return None
+
+
+def rank_candidates(items: list[dict], model: str, n: int = 10) -> list[tuple[str, str]]:
+    """Rangliste aus den geprüften Kandidaten: [(clip_id, Begründung)], beste zuerst."""
+    lines = []
+    for c in items:
+        r = c.get("deep") or {}
+        lines.append(f"- id={c['clip_id']} | {c['name']} | {time.strftime('%H:%M', time.localtime(c['t']))} Uhr | "
+                     f"Note {r.get('score', c['score1'])}/10 | Chat {c.get('stats', {}).get('factor', 0):.1f}x | "
+                     f"Titel: {r.get('hook') or c.get('hook1', '')} | Was: {r.get('what') or c.get('what1', '')} | "
+                     f"Warum: {r.get('why', '')}")
+    prompt = f"""Hier sind {len(items)} geprüfte GTA-6-Clip-Kandidaten deutscher Twitch-Streamer:
+{chr(10).join(lines)}
+
+Wähle bis zu {n} für die Auswahlliste, beste zuerst. Regeln:
+- Qualität und Viralität für Leute, die die Streamer nicht kennen, gehen vor.
+- Doppelte Momente (gleicher Streamer, gleiche Szene, wenige Minuten auseinander) nur einmal – den besseren.
+- Bei ähnlicher Qualität für Abwechslung bei den Streamern sorgen.
+Antworte NUR mit JSON: {{"ranking": [{{"id": "<id>", "reason": "<1 kurzer Satz>"}}]}}"""
+    known = {c["clip_id"] for c in items}
+    try:
+        j = parse_json(claude_call(model, prompt, max_tokens=8000, timeout=180))
+        out, seen = [], set()
+        for x in j.get("ranking", []):
+            if x.get("id") in known and x["id"] not in seen:
+                seen.add(x["id"])
+                out.append((x["id"], x.get("reason", "")))
+    except Exception as e:
+        log(f"  Rangliste fehlgeschlagen: {str(e)[:150]} – sortiere nach Note")
+        out, seen = [], set()
+    srt = sorted(items, key=lambda c: ((c.get("deep") or {}).get("score", c["score1"]),
+                                       c.get("stats", {}).get("factor", 0)), reverse=True)
+    for c in srt:  # Liste mit den nächstbesten auffüllen
+        if len(out) >= n:
+            break
+        if c["clip_id"] not in seen and (c.get("deep") or {}).get("score", c["score1"]) >= C["min_score"]:
+            seen.add(c["clip_id"])
+            out.append((c["clip_id"], ""))
+    return out[:n]
 
 
 SUBGIFT_RE = re.compile(r"gifts\b|sub[\s\-]*gift|gifted|giftsub|gift[\s\-]*ankündigung|"
@@ -529,7 +671,7 @@ def subgift_moment(words, chat_lines: list[str], verdict: dict) -> str:
 def recent_activity(minutes: int = 10) -> dict:
     """Zählt aus dem Log (übersteht Neustarts): Momente, erstellte Clips, geschnittene, aussortierte."""
     since = (dt.datetime.now() - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
-    out = {"moments": 0, "clips": 0, "cut": 0, "rejected": 0}
+    out = {"moments": 0, "clips": 0, "cut": 0, "rejected": 0, "kept": 0}
     try:
         with open(LOGS / "livebot.log", "rb") as f:
             f.seek(0, 2)
@@ -546,6 +688,8 @@ def recent_activity(minutes: int = 10) -> dict:
             out["clips"] += 1
         elif "✅ an Telegram geschickt" in line:
             out["cut"] += 1
+        elif "📥 Kandidat" in line:
+            out["kept"] += 1
         elif "Aussortiert:" in line:
             out["rejected"] += 1
         else:
@@ -733,6 +877,7 @@ class Bot:
         self.pub_lock = threading.Lock()
         self.yt_times: collections.deque = collections.deque()
         self.busy = False
+        self.digest_busy = False
         self.pending_file = STATE / "pending.json"
         self.plock = threading.Lock()
         try:
@@ -881,14 +1026,27 @@ class Bot:
                 log(f"  Aussortiert: Sub-Gifts {why} – Fehlalarm, wird nicht gepostet")
                 self.stats["rejected"] += 1
                 return
+            if C["mode"] == "digest" and not job.get("platforms"):  # sammeln für die nächste Top-10-Liste
+                sel.LIB.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src, sel.LIB / f"{job['clip_id']}.mp4")
+                sel.save_candidate({
+                    "clip_id": job["clip_id"], "clip_url": clip_url, "name": name, "login": login,
+                    "viewers": s.get("viewer_count", 0), "stream_title": s.get("title", ""),
+                    "t": job["t"], "created": time.time(), "dur": dur,
+                    "words": [list(w) for w in words], "chat": job["chat"][-60:], "stats": st,
+                    "viewer_clip": bool(job.get("viewer_clip")), "score1": verdict["score"],
+                    "hook1": verdict.get("hook", ""), "what1": verdict.get("reason", ""),
+                    "caption1": verdict.get("caption", ""), "status": "new"})
+                self.stats["candidates"] += 1
+                log(f"  📥 Kandidat für die nächste Top-10-Liste gespeichert ({verdict['score']}/10)")
+                return
             now = time.time()
             while self.sent_times and self.sent_times[0] < now - 3600:
                 self.sent_times.popleft()
             if len(self.sent_times) >= C["max_per_hour"]:
                 log("  Stundenlimit erreicht – übersprungen")
                 return
-            hook = re.sub(r"#\w+|[„“”\"‚‘’»«]", "", verdict.get("hook", "")).replace("\n", " ").strip()[:90] \
-                or f"{name} in GTA 6 😂"
+            hook = clean_hook(verdict.get("hook"), name)
             if not verdict.get("caption"):
                 verdict["caption"] = fallback_judge(name, login, words, st)["caption"]
             out, info = cb.make_vertical(src, td, hook, words=words)
@@ -1036,6 +1194,188 @@ class Bot:
                 pass
 
     # --- Telegram-Befehle ---------------------------------------------------
+    # --- Top-10-Listen ----------------------------------------------------
+    def run_digest(self, label: str, slot: dt.datetime | None) -> None:
+        self.digest_busy = True
+        try:
+            self._digest(label, slot)
+        except Exception as e:
+            log(f"Top-10-Liste {label} fehlgeschlagen: {e}")
+            try:
+                self.tg.message(f"⚠️ Top-10-Liste ({label}) fehlgeschlagen: {str(e)[:200]}")
+            except Exception:
+                pass
+        finally:
+            if slot is not None:
+                sel.mark_slot(label)
+            self.digest_busy = False
+
+    def _digest(self, label: str, slot: dt.datetime | None) -> None:
+        cands = sel.candidates("new")
+        prev = sel.load_digest() or {}
+        end = slot or dt.datetime.now()
+        span = (time.strftime("%H:%M", time.localtime(prev["sent_at"])) + "–" if prev.get("sent_at") else "bis ") \
+            + end.strftime("%H:%M")
+        if not cands:
+            log(f"Top-10-Liste {label}: keine Kandidaten")
+            self.tg.message(f"🏆 Top-10-Liste {span} Uhr: In diesem Zeitraum kam kein Clip über {C['min_score']}/10.")
+            return
+        cands.sort(key=lambda c: (c["score1"], c.get("stats", {}).get("factor", 0)), reverse=True)
+        pool = cands[:int(C["deep_n"])]
+        model = deep_model()
+        log(f"Top-10-Liste {label}: {len(cands)} Kandidaten, {len(pool)} werden mit {model} genau geprüft")
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(3) as ex:
+            for c, r in zip(pool, ex.map(lambda c: deep_review(c, model), pool)):
+                c["deep"] = r
+        pool = [c for c in pool if not c.get("deep") or
+                (c["deep"]["score"] > 0 and not subgift_moment([], [], c["deep"]))]
+        ranking = rank_candidates(pool, model, 10)
+        byid = {c["clip_id"]: c for c in pool}
+        items = []
+        for n, (cid, reason) in enumerate(ranking, 1):
+            c, r = byid[cid], (byid[cid].get("deep") or {})
+            hook = clean_hook(r.get("hook") or c.get("hook1"), c["name"])
+            final = sel.LIB / f"{cid}_final.mp4"
+            with tempfile.TemporaryDirectory() as td:
+                out, info = cb.make_vertical(sel.LIB / f"{cid}.mp4", Path(td), hook)
+                shutil.copy(out, final)
+            items.append({"n": n, "clip_id": cid, "name": c["name"], "login": c["login"], "hook": hook,
+                          "caption": r.get("caption") or c.get("caption1") or f"{c['name']} in GTA 6 😂\n\n#gta6",
+                          "score": r.get("score", c["score1"]), "what": r.get("what") or c.get("what1", ""),
+                          "why": reason or r.get("why", ""), "file": str(final), "dur": info["dur"],
+                          "clip_url": c.get("clip_url", ""), "t": c["t"]})
+            log(f"  #{n} {c['name']} {items[-1]['score']}/10 – {hook}")
+        if slot is not None:  # vorbereitet – pünktlich zur vollen Stunde schicken
+            wait = (slot - dt.datetime.now()).total_seconds()
+            if wait > 0:
+                time.sleep(min(wait, 20 * 60))
+        tt_hint = " · mit TikTok: <code>/push 3 7 1 tiktok</code>" if tiktok_web.ready() else ""
+        self.tg.message(f"🏆 <b>Top {len(items)} · {span} Uhr</b>\n{len(cands)} Clips gesammelt, {len(pool)} genau "
+                        f"geprüft ({html.escape(model)}).\n\nAuswählen: <code>/push 3 7 1</code> – der erste geht sofort "
+                        f"raus, die anderen alle {C['push_gap_min']:.0f} min{tt_hint}", parse_html=True)
+        for it in items:
+            cap = (f"<b>#{it['n']}</b> · {html.escape(it['name'])} · {it['score']}/10\n"
+                   f"<b>{html.escape(it['hook'])}</b>\n💡 {html.escape(it['why'])}\n📝 {html.escape(it['what'])}")
+            try:
+                self.tg.video(Path(it["file"]), cap[:1000], cb.W, cb.H, it["dur"])
+            except Exception as e:
+                log(f"  Telegram-Video #{it['n']}: {e}")
+        sel.save_digest({"label": label, "span": span, "sent_at": time.time(), "items": items,
+                         "collected": len(cands), "reviewed": len(pool), "model": model})
+        sel.set_status([c["clip_id"] for c in cands], "done")
+        self.send_list()
+        self.cleanup()
+        log(f"Top-10-Liste {label} verschickt ({len(items)} Clips)")
+
+    def send_list(self) -> None:
+        d = sel.load_digest()
+        if not d or not d.get("items"):
+            self.tg.message("Noch keine Top-10-Liste verschickt.")
+            return
+        lines = [f"📋 <b>Top {len(d['items'])} · {d['span']} Uhr</b>"]
+        lines += [f"<b>#{it['n']}</b> {html.escape(it['name'])} · {it['score']}/10 – {html.escape(it['hook'])}"
+                  for it in d["items"]]
+        lines.append("\nAuswählen: <code>/push 3 7 1</code> (optional <code>tiktok</code> dahinter)")
+        self.tg.message("\n".join(lines), parse_html=True)
+
+    def cleanup(self) -> None:
+        keep = {it["clip_id"] for it in (sel.load_digest() or {}).get("items", [])}
+        keep |= {e["clip_id"] for e in sel.load_schedule() if e.get("status") in ("geplant", "läuft")}
+        n = sel.cleanup(keep)
+        if n:
+            log(f"Aufgeräumt: {n} alte Videodateien gelöscht")
+
+    # --- Geplante Posts (/push) -----------------------------------------
+    def schedule_tick(self) -> None:
+        if self.pub_lock.locked():
+            return
+        sch = sel.load_schedule()
+        due = sorted((e for e in sch if e.get("status") == "geplant" and e["due"] <= time.time()),
+                     key=lambda e: e["due"])
+        if not due:
+            return
+        e = due[0]
+        e["status"] = "läuft"
+        sel.save_schedule(sch)
+        threading.Thread(target=self._post_scheduled, args=(e["id"],), daemon=True).start()
+
+    def _post_scheduled(self, eid: str) -> None:
+        e = next(x for x in sel.load_schedule() if x["id"] == eid)
+        status = "gepostet"
+        try:
+            src = Path(e["file"])
+            if not src.exists():
+                raise FileNotFoundError("Video-Datei fehlt")
+            outbox = STATE / "outbox"
+            outbox.mkdir(exist_ok=True)
+            keep = outbox / f"{e['clip_id']}.mp4"
+            shutil.copy(src, keep)
+            log(f"🚀 Geplanter Post #{e['n']}: {e['name']} – {e['hook']}")
+            self.tg.message(f"🚀 Poste jetzt #{e['n']}: {e['hook']}")
+            p = e["platforms"]
+            self.publish(keep, {"hook": e["hook"], "caption": e["caption"], "score": e.get("score", 0)},
+                         e["name"], e["login"], "youtube" in p and self.yt_on, "instagram" in p and self.ig_on,
+                         "tiktok" in p and tiktok_web.ready())
+        except Exception as ex:
+            status = "fehlgeschlagen"
+            log(f"Geplanter Post #{e.get('n')} fehlgeschlagen: {ex}")
+            try:
+                self.tg.message(f"⚠️ Geplanter Post #{e.get('n')} fehlgeschlagen: {str(ex)[:200]}")
+            except Exception:
+                pass
+        sch = sel.load_schedule()
+        for x in sch:
+            if x["id"] == eid:
+                x["status"] = status
+        sel.save_schedule(sch)
+
+    def cmd_push(self, arg: str) -> None:
+        d = sel.load_digest()
+        if not d or not d.get("items"):
+            self.tg.message("Noch keine Top-10-Liste da – die nächste kommt um "
+                            f"{sel.next_slot(C['digest_hours'], dt.datetime.now()):%H:%M} Uhr.")
+            return
+        toks = re.findall(r"\w+", arg.lower())
+        nums = [int(t) for t in toks if t.isdigit()]
+        tiktok = any(t in ("tiktok", "tt") for t in toks)
+        if not nums or len(nums) > 3 or len(set(nums)) != len(nums):
+            self.tg.message("So: /push 3 7 1 – bis zu 3 verschiedene Nummern aus der letzten Liste "
+                            "(der erste geht sofort raus). Mit TikTok: /push 3 7 1 tiktok")
+            return
+        items = {it["n"]: it for it in d["items"]}
+        bad = [n for n in nums if n not in items or not Path(items[n]["file"]).exists()]
+        if bad:
+            self.tg.message(f"Nummer {', '.join(map(str, bad))} gibt es in der letzten Liste nicht (mehr).")
+            return
+        plats = ["youtube", "instagram"] + (["tiktok"] if tiktok else [])
+        times = sel.plan_times(len(nums), dt.datetime.now(), int(C["push_gap_min"]))
+        sch = sel.load_schedule()
+        for n, t in zip(nums, times):
+            it = items[n]
+            sch.append({"id": f"{it['clip_id']}-{int(time.time() * 1000) % 10**7}-{n}", "n": n, "due": t.timestamp(),
+                        "clip_id": it["clip_id"], "name": it["name"], "login": it["login"], "hook": it["hook"],
+                        "caption": it["caption"], "score": it["score"], "file": it["file"], "platforms": plats,
+                        "status": "geplant"})
+        sel.save_schedule(sch)
+        names = " + ".join({"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}[p] for p in plats)
+        lines = [f"✅ Geplant ({names}):"] + [f"{t:%H:%M} – #{n} {items[n]['hook']}" for n, t in zip(nums, times)]
+        self.tg.message("\n".join(lines))
+        log(f"/push {' '.join(map(str, nums))}{' tiktok' if tiktok else ''} geplant")
+
+    def plan_text(self) -> str:
+        sch = sorted(sel.load_schedule(), key=lambda e: e["due"])
+        open_ = [e for e in sch if e.get("status") in ("geplant", "läuft")]
+        today = [e for e in sch if e.get("status") not in ("geplant", "läuft")
+                 and e["due"] > time.time() - 86400]
+        lines = ["📅 <b>Geplant</b>"] + ([f"{time.strftime('%H:%M', time.localtime(e['due']))} – #{e['n']} "
+                                         f"{html.escape(e['hook'])}{' (läuft)' if e['status'] == 'läuft' else ''}"
+                                         for e in open_] or ["nichts"])
+        if today:
+            lines += ["", "<b>Letzte 24 h</b>"] + [f"{time.strftime('%H:%M', time.localtime(e['due']))} – #{e['n']} "
+                                                   f"{html.escape(e['hook'])} · {e['status']}" for e in today[-8:]]
+        return "\n".join(lines)
+
     def commands(self) -> None:
         offset = None
         base = self.tg.base
@@ -1076,18 +1416,35 @@ class Bot:
             a = recent_activity(10)
             work = self.jobs.qsize() + (1 if self.busy else 0)
             lines.append("")
-            lines.append(f"⏱ Letzte 10 min: {a['moments']} Momente erkannt · {a['clips']} Clips erstellt · "
-                         f"{a['cut']} geschnitten & geschickt · {a['rejected']} aussortiert"
-                         f"{f' · {work} in Arbeit' if work else ''}")
-            lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
-                         f"heute {len(self.yt_times)} hochgeladen")
-            lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
-                         f"heute {len(self.ig_times)} hochgeladen")
-            tt_state = ("an" if self.tt_on else "aus") if tiktok_web.ready() else "nicht eingeloggt"
-            tt_lim = "" if C["tt_max_per_day"] >= 1000 else f", max. {C['tt_max_per_day']:.0f}/Tag"
-            tt_gap = f", alle {C['tt_gap_min']:.0f} min" if C["tt_gap_min"] else ""
-            lines.append(f"TikTok-Autoupload: {tt_state} (ab {C['tt_min_score']}/10{tt_lim}{tt_gap}) · "
-                         f"heute {len(self.tt_times)} gepostet")
+            if C["mode"] == "digest":
+                lines.append(f"⏱ Letzte 10 min: {a['moments']} Momente erkannt · {a['clips']} Clips erstellt · "
+                             f"{a['kept']} als Kandidat gespeichert · {a['rejected']} aussortiert"
+                             f"{f' · {work} in Arbeit' if work else ''}")
+                nxt = sel.next_slot(C["digest_hours"], dt.datetime.now())
+                lines.append(f"🏆 Top-10-Listen um {'/'.join(str(h) for h in C['digest_hours'])} Uhr · nächste "
+                             f"{nxt:%H:%M}{' (wird gerade erstellt)' if self.digest_busy else ''} · gesammelt: "
+                             f"{len(sel.candidates('new'))} Kandidaten")
+                plan = sorted((e for e in sel.load_schedule() if e.get("status") == "geplant"), key=lambda e: e["due"])
+                lines.append(f"📅 Geplant: {len(plan)} Posts" + (f" (nächster {time.strftime('%H:%M', time.localtime(plan[0]['due']))} "
+                                                                 f"#{plan[0]['n']})" if plan else "") + " · /plan")
+                lines.append(f"🤖 KI: Vorauswahl {stage1_model()} · genaue Prüfung {deep_model()} · heute "
+                             f"{sel.cost_today():.2f} $ · seit {C['cycle_start']} {sel.cost_since(C['cycle_start']):.2f} $ "
+                             f"von {C['cycle_budget']:.0f} $")
+                lines.append(f"Bei /push: YouTube {'an' if self.yt_on else 'aus'} · Instagram {'an' if self.ig_on else 'aus'}"
+                             f" · TikTok {'nur mit „tiktok“' if tiktok_web.ready() else 'nicht eingeloggt'}")
+            else:
+                lines.append(f"⏱ Letzte 10 min: {a['moments']} Momente erkannt · {a['clips']} Clips erstellt · "
+                             f"{a['cut']} geschnitten & geschickt · {a['rejected']} aussortiert"
+                             f"{f' · {work} in Arbeit' if work else ''}")
+                lines.append(f"YouTube-Autoupload: {'an' if self.yt_on else 'aus'} (ab {C['yt_min_score']}/10) · "
+                             f"heute {len(self.yt_times)} hochgeladen")
+                lines.append(f"Instagram-Autoupload: {'an' if self.ig_on else 'aus'} (ab {C['ig_min_score']}/10) · "
+                             f"heute {len(self.ig_times)} hochgeladen")
+                tt_state = ("an" if self.tt_on else "aus") if tiktok_web.ready() else "nicht eingeloggt"
+                tt_lim = "" if C["tt_max_per_day"] >= 1000 else f", max. {C['tt_max_per_day']:.0f}/Tag"
+                tt_gap = f", alle {C['tt_gap_min']:.0f} min" if C["tt_gap_min"] else ""
+                lines.append(f"TikTok-Autoupload: {tt_state} (ab {C['tt_min_score']}/10{tt_lim}{tt_gap}) · "
+                             f"heute {len(self.tt_times)} gepostet")
             lines.append(f"Seit Start: {self.stats['spikes']} Momente, {self.stats['sent']} geschickt, "
                          f"{self.stats['rejected']} aussortiert, {self.stats['errors']} Fehler")
             self.tg.message("\n".join(lines))
@@ -1103,6 +1460,29 @@ class Bot:
             else:
                 self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
+        elif cmd == "/push":
+            self.cmd_push(arg)
+        elif cmd == "/plan":
+            self.tg.message(self.plan_text(), parse_html=True)
+        elif cmd == "/stop":
+            sch = sel.load_schedule()
+            n = 0
+            for e in sch:
+                if e.get("status") == "geplant":
+                    e["status"] = "abgebrochen"
+                    n += 1
+            sel.save_schedule(sch)
+            self.tg.message(f"⏹ {n} geplante Posts abgebrochen.")
+        elif cmd == "/liste":
+            self.send_list()
+        elif cmd == "/digest":
+            if self.digest_busy:
+                self.tg.message("Eine Top-10-Liste wird gerade schon erstellt.")
+            else:
+                self.digest_busy = True
+                self.tg.message("⏳ Erstelle jetzt eine Top-10-Liste aus allem seit der letzten – dauert ein paar Minuten.")
+                threading.Thread(target=self.run_digest, args=(f"manuell {dt.datetime.now():%H:%M}", None),
+                                 daemon=True).start()
         elif cmd in ("/erweitere", "/erweitern", "/top"):
             try:
                 n = int(arg.strip())
@@ -1161,7 +1541,8 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /pause · /resume · /test <streamer> · /clip <Link> · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
+            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] · /plan · /stop · /digest (Liste sofort) · "
+                            "/pause · /resume · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
@@ -1188,11 +1569,20 @@ class Bot:
         last_start.write_text(str(time.time()))
         if not quiet:
             try:
-                self.tg.message(f"🟢 Live-Clipper gestartet ({C['game']}, Top {C['top_n']}). /status für Details.")
+                mode = ("Top-10-Listen um " + "/".join(str(h) for h in C["digest_hours"]) + " Uhr"
+                        if C["mode"] == "digest" else "Sofort-Posten")
+                self.tg.message(f"🟢 Live-Clipper gestartet ({C['game']}, Top {C['top_n']}, {mode}). /status für Details.")
             except Exception as e:
                 log(f"Telegram: {e}")
         watch = {p: p.stat().st_mtime for p in [*ROOT.glob("*.py"), ROOT / ".env"] if p.exists()}
         last_refresh = 0.0
+        last_tick = 0.0
+        sch = sel.load_schedule()  # Posts, die bei einem Absturz mittendrin waren, nicht doppelt senden
+        if any(e.get("status") == "läuft" for e in sch):
+            for e in sch:
+                if e.get("status") == "läuft":
+                    e["status"] = "unklar (Neustart)"
+            sel.save_schedule(sch)
         while True:
             now = time.time()
             if now - last_refresh > C["refresh_s"] or self.refresh_now:
@@ -1205,7 +1595,7 @@ class Bot:
                 # Code/Config geändert -> sauber beenden, launchd startet neu
                 changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
                 if changed:
-                    if not self.busy and not self.pub_lock.locked():
+                    if not self.busy and not self.pub_lock.locked() and not self.digest_busy:
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
@@ -1219,6 +1609,17 @@ class Bot:
                 except Exception as e:
                     log(f"inject.json: {e}")
                 inject.unlink(missing_ok=True)
+            if C["mode"] == "digest" and now - last_tick >= 10:
+                last_tick = now
+                try:
+                    self.schedule_tick()
+                    if not self.digest_busy:
+                        ds = sel.due_slot(C["digest_hours"], dt.datetime.now())
+                        if ds:
+                            self.digest_busy = True
+                            threading.Thread(target=self.run_digest, args=ds, daemon=True).start()
+                except Exception as e:
+                    log(f"Planer: {e}")
             if not self.paused:
                 for login in list(self.streams):
                     if now - self.last_clip.get(login, 0) < C["cooldown_s"]:
