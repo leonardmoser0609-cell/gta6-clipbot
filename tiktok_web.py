@@ -104,8 +104,12 @@ def ready() -> bool:
 
 def _launch(p, headless: bool = False):
     PROFILE.mkdir(parents=True, exist_ok=True)
+    if headless:  # unsichtbar im Hintergrund: voller Chromium im „new headless“-Modus, kein Fenster, kein Fokus-Klau
+        return p.chromium.launch_persistent_context(
+            str(PROFILE), headless=True, channel="chromium", locale="de-DE",
+            viewport={"width": 1280, "height": 860})
     return p.chromium.launch_persistent_context(
-        str(PROFILE), headless=headless, locale="de-DE", viewport={"width": 1280, "height": 860},
+        str(PROFILE), headless=False, locale="de-DE", viewport={"width": 1280, "height": 860},
         args=["--window-position=60,60", "--window-size=1300,960"])
 
 
@@ -259,6 +263,20 @@ def _type_caption(page, caption: str) -> None:
 
 
 def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
+    """Postet im Hintergrund; scheitert das unsichtbare Hochladen VOR dem Veröffentlichen, einmal mit Fenster."""
+    try:
+        return _post(video, caption, log, headless)
+    except (NeedsHuman, ProfileBusy):
+        raise
+    except Exception as e:
+        if not headless or getattr(e, "published_clicked", True):
+            raise
+        log(f"  TikTok im Hintergrund fehlgeschlagen ({str(e)[:80]}) – nochmal mit Fenster")
+        return _post(video, caption, log, False)
+
+
+def _post(video: Path, caption: str, log=print, headless: bool = False) -> str:
+    clicked = False
     if _profile_busy():
         raise ProfileBusy("das TikTok-Browserfenster ist noch offen")
     from playwright.sync_api import sync_playwright
@@ -295,6 +313,7 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
             _dismiss(page)
             btn = _post_button(page)
             btn.scroll_into_view_if_needed()
+            clicked = True
             _click(page, btn)
             t0 = time.time()
             while time.time() - t0 < 120:  # ggf. Rückfrage „Jetzt posten“ bestätigen, dann auf Erfolg warten
@@ -338,9 +357,13 @@ def post(video: Path, caption: str, log=print, headless: bool = False) -> str:
             if link:
                 _LAST_LINK = link
             return link or "gepostet (Link in TikTok Studio)"
-        except Exception:
+        except Exception as e:
             shot = _dump(page, "fehler")
             log(f"  TikTok: Bildschirmfoto vom Fehler in logs/tiktok/{shot.name if shot else '-'}")
+            try:
+                e.published_clicked = clicked
+            except Exception:
+                pass
             raise
         finally:
             try:

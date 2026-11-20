@@ -95,7 +95,7 @@ C = {
     "tt_min_score": _f("TT_MIN_SCORE", 7),
     "tt_max_per_day": _f("TT_MAX_PER_DAY", 12),
     "tt_gap_min": _f("TT_GAP_MIN", 30),
-    "tt_headless": os.getenv("TT_HEADLESS", "0") == "1",
+    "tt_headless": os.getenv("TT_HEADLESS", "1") == "1",  # TikTok-Upload unsichtbar im Hintergrund
 }
 
 # ---------------------------------------------------------------------------
