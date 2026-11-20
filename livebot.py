@@ -1348,6 +1348,9 @@ class Bot:
         if bad:
             self.tg.message(f"Nummer {', '.join(map(str, bad))} gibt es in der letzten Liste nicht (mehr).")
             return
+        tt_note = ""
+        if tiktok and not tiktok_web.ready():
+            tiktok, tt_note = False, "\n⚠️ TikTok ist nicht eingeloggt – geht nur auf YouTube und Instagram."
         plats = ["youtube", "instagram"] + (["tiktok"] if tiktok else [])
         times = sel.plan_times(len(nums), dt.datetime.now(), int(C["push_gap_min"]))
         sch = sel.load_schedule()
@@ -1360,7 +1363,7 @@ class Bot:
         sel.save_schedule(sch)
         names = " + ".join({"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}[p] for p in plats)
         lines = [f"✅ Geplant ({names}):"] + [f"{t:%H:%M} – #{n} {items[n]['hook']}" for n, t in zip(nums, times)]
-        self.tg.message("\n".join(lines))
+        self.tg.message("\n".join(lines) + tt_note)
         log(f"/push {' '.join(map(str, nums))}{' tiktok' if tiktok else ''} geplant")
 
     def plan_text(self) -> str:
