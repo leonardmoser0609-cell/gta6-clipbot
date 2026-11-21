@@ -1276,6 +1276,54 @@ class Bot:
         self.cleanup()
         log(f"Top-10-Liste {label} verschickt ({len(items)} Clips)")
 
+    def add_missing_cta(self) -> None:
+        """Einmalig: Videos der aktuellen Liste und geplante Posts ohne Call-to-Action neu rendern."""
+        d = sel.load_digest() or {}
+        items = [it for it in d.get("items", []) if not it.get("cta")]
+        todo = [e for e in sel.load_schedule() if e.get("status") == "geplant" and not e.get("cta")]
+        if not items and not todo:
+            return
+        self.digest_busy = True
+        try:
+            entries = items + todo
+            lines = "\n".join(f"- id={e['clip_id']} | {e['name']} | Titel: {e['hook']}" for e in entries)
+            prompt = (f"Schreibe für jeden dieser GTA-6-Clips einen {CTA_RULES}.\n{lines}\n"
+                      'Antworte NUR mit JSON: {"cta": {"<id>": "<Call-to-Action>"}}')
+            try:
+                ctas = parse_json(claude_call(deep_model(), prompt, max_tokens=4000, timeout=120)).get("cta", {})
+            except Exception as e:
+                log(f"CTA-Nachtrag: {e}")
+                ctas = {}
+            done: dict[str, str] = {}
+            for e in entries:
+                cid = e["clip_id"]
+                if cid not in done:
+                    cta = re.sub(r"#\w+|[„“”\"‚‘’»«]", "", ctas.get(cid) or "").strip()[:70] or CTA_DEFAULT
+                    raw = sel.LIB / f"{cid}.mp4"
+                    if not raw.exists():
+                        continue
+                    with tempfile.TemporaryDirectory() as td:
+                        out, _ = cb.make_vertical(raw, Path(td), e["hook"], cta=cta)
+                        tmp = Path(e["file"]).with_suffix(".tmp.mp4")
+                        shutil.copy(out, tmp)
+                        tmp.replace(e["file"])
+                    done[cid] = cta
+                    log(f"  CTA nachgetragen: {e['name']} – {cta}")
+                e["cta"] = done[cid]
+            if items:
+                sel.save_digest(d)
+            sch = sel.load_schedule()
+            for e in sch:
+                if e.get("clip_id") in done and e.get("status") == "geplant":
+                    e["cta"] = done[e["clip_id"]]
+            sel.save_schedule(sch)
+            if done:
+                self.tg.message(f"👉 Call-to-Action in {len(done)} Videos der aktuellen Liste bzw. geplanten Posts nachgetragen.")
+        except Exception as e:
+            log(f"CTA-Nachtrag fehlgeschlagen: {e}")
+        finally:
+            self.digest_busy = False
+
     def send_list(self) -> None:
         d = sel.load_digest()
         if not d or not d.get("items"):
@@ -1572,6 +1620,8 @@ class Bot:
         self._save_pending()
         threading.Thread(target=self.worker, daemon=True).start()
         threading.Thread(target=self.commands, daemon=True).start()
+        if C["mode"] == "digest":
+            threading.Thread(target=self.add_missing_cta, daemon=True).start()
         last_start = STATE / "last_start"
         try:
             quiet = time.time() - float(last_start.read_text()) < 900  # Neustart nach Update: still
