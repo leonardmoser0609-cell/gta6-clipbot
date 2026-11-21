@@ -94,8 +94,26 @@ def ensure_installed(verbose: bool = False) -> None:
 
 
 def ready() -> bool:
-    """Profil mit Login vorhanden (Login-Skript lief erfolgreich)."""
-    return (PROFILE / ".logged_in").exists()
+    """Profil mit TikTok-Login vorhanden (Markierung vom Login-Skript oder Sitzungs-Cookie im Profil)."""
+    if (PROFILE / ".logged_in").exists():
+        return True
+    db = PROFILE / "Default" / "Cookies"
+    if not db.exists():
+        return False
+    try:
+        import shutil as _sh
+        import sqlite3
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as td:  # Kopie lesen, falls der Browser die Datei gerade offen hat
+            cp = Path(td) / "c.db"
+            _sh.copy(db, cp)
+            n = sqlite3.connect(cp).execute(
+                "select count(*) from cookies where host_key like '%tiktok.com' and name='sessionid'").fetchone()[0]
+        if n:
+            (PROFILE / ".logged_in").write_text(time.strftime("%Y-%m-%d %H:%M"))
+        return bool(n)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +222,11 @@ def login(timeout_s: int = 900) -> bool:
             ctx.close()
             print("❌ Kein Login erkannt (Zeit abgelaufen).", flush=True)
             return False
-        page.goto(UPLOAD_URL, wait_until="domcontentloaded")
+        (PROFILE / ".logged_in").write_text(time.strftime("%Y-%m-%d %H:%M"))
+        try:
+            page.goto(UPLOAD_URL, wait_until="domcontentloaded")
+        except Exception:
+            pass
         print("✅ Eingeloggt.", flush=True)
         print("Falls TikTok noch etwas fragt (Sicherheitsabfrage, Hinweise), im Fenster erledigen.\n"
               "Danach das Browserfenster schließen – erst dann kann der Bot posten.", flush=True)
