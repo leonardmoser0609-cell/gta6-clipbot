@@ -434,47 +434,62 @@ def split_crops(face, fw: int, fh: int) -> tuple[tuple, tuple]:
     return ((_even(cw), _even(ch), _even(cx), _even(cy)), (_even(gw), _even(gh), _even(gx), _even(gy) if gy else 0))
 
 
-def render_short(src: Path, out: Path, dur: float, title: str, maxrate: float = 4.5, face="auto") -> str:
-    """Rendert das Short im neuen Look. Rückgabe: 'split' oder 'classic'."""
+CTA_SECONDS = 3.5  # so lange steht der Call-to-Action am Ende statt des Titels
+
+
+def render_short(src: Path, out: Path, dur: float, title: str, maxrate: float = 4.5, face="auto",
+                 cta: str = "") -> str:
+    """Rendert das Short im neuen Look (optional mit Call-to-Action in den letzten Sekunden).
+    Rückgabe: 'split' oder 'classic'."""
     wd = out.parent
     if face == "auto":
         try:
             face = detect_facecam(src, dur)
         except Exception:
             face = None
-    tpng = wd / "title.png"
+    tpng, cpng = wd / "title.png", wd / "cta.png"
     enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", f"{maxrate}M",
            "-bufsize", f"{maxrate * 2}M", "-profile:v", "high", "-c:a", "aac", "-b:a", "160k",
            "-movflags", "+faststart"]
     if face:
         (cw, ch, cx, cy), (gw, gh, gx, gy) = split_crops(face, face[4], face[5])
-        title_overlay(tpng, title, TOP_H)
+        cy_title = TOP_H
+        title_overlay(tpng, title, cy_title)
         fc = (f"[0:v]crop={cw}:{ch}:{cx}:{cy},scale={W}:{TOP_H}:flags=lanczos,setsar=1[top];"
               f"[0:v]crop={gw}:{gh}:{gx}:{gy},scale={W}:{BOT_H}:flags=lanczos,setsar=1[bot];"
-              f"[top][bot]vstack=inputs=2[stk];[1:v]format=rgba[t];[stk][t]overlay=0:0,format=yuv420p[v]")
+              f"[top][bot]vstack=inputs=2[v1];[1:v]format=rgba[t];[v1][t]overlay=0:0,format=yuv420p[v]")
         mode = "split"
     else:
         lay = layout_for(16, 9)
-        title_overlay(tpng, title, max(lay["top"] - 120, 240))
+        cy_title = max(lay["top"] - 120, 240)
+        title_overlay(tpng, title, cy_title)
         fc = (f"[0:v]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,"
               f"boxblur=12:2,scale={W}:{H},eq=brightness=-0.12:saturation=1.2,setsar=1[bg];"
               f"[0:v]scale={W}:-2,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[v1];"
               f"[1:v]format=rgba[t];[v1][t]overlay=0:0,format=yuv420p[v]")
         mode = "classic"
+    extra = []
+    if cta and dur > CTA_SECONDS + 3:  # am Ende: Titel aus, Call-to-Action an gleicher Stelle
+        t_cta = dur - CTA_SECONDS
+        title_overlay(cpng, cta, cy_title)
+        fc = fc.replace("[v1][t]overlay=0:0,format=yuv420p[v]",
+                        f"[2:v]format=rgba[c];[v1][t]overlay=0:0:enable='lt(t,{t_cta:.2f})'[v2];"
+                        f"[v2][c]overlay=0:0:enable='gte(t,{t_cta:.2f})',format=yuv420p[v]")
+        extra = ["-loop", "1", "-i", str(cpng)]
     cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), "-loop", "1", "-i", str(tpng),
-           "-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-t", f"{dur:.3f}", *enc, str(out)]
+           *extra, "-filter_complex", fc, "-map", "[v]", "-map", "0:a?", "-t", f"{dur:.3f}", *enc, str(out)]
     _sp.run(cmd, check=True, timeout=900)
     return mode
 
 
-def render_short_fit(src: Path, out: Path, dur: float, title: str, limit_bytes: float = 48e6) -> str:
+def render_short_fit(src: Path, out: Path, dur: float, title: str, limit_bytes: float = 48e6, cta: str = "") -> str:
     try:
         face = detect_facecam(src, dur)
     except Exception:
         face = None
     mode = "classic"
     for rate in (4.5, 3.0, 2.0):
-        mode = render_short(src, out, dur, title, maxrate=rate, face=face)
+        mode = render_short(src, out, dur, title, maxrate=rate, face=face, cta=cta)
         if out.stat().st_size <= limit_bytes:
             break
     return mode

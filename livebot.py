@@ -551,6 +551,11 @@ HOOK_RULES = ("Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3
               "eindeutig zu erkennen, was passiert, leite ihn sinngemäß aus dem Gesagten im Höhepunkt ab – NIE als "
               "wörtliches Zitat, keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist. Keine "
               "Hashtags, kein Clickbait, das nicht stimmt")
+CTA_DEFAULT = "Folge für mehr Clips deiner Lieblingsstreamer 🎮"
+CTA_RULES = ("Call-to-Action für die letzten 3 Sekunden des Videos: Deutsch, höchstens 8 Wörter, fordert zum Folgen auf, "
+             "gern witzig und passend zum Clip mit GTA-6-Bezug (z. B. Lucia, Mandy, Jason, Vice City), z. B. 'Folge für "
+             "mehr Clips deiner Lieblingsstreamer 🎮' oder 'Folge – dann klappt es auch mit Lucia 😏'. Genau 1 Emoji, "
+             "keine Anführungszeichen, keine Hashtags")
 CAPTION_RULES = ("Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 "
                  "passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, "
                  "KEIN Credit")
@@ -601,6 +606,7 @@ Aufgabe:
 Antworte NUR mit JSON:
 {{"what": "<1-2 Sätze, sachlich>", "score": <0-10>, "why": "<1 kurzer Satz, warum der Clip zieht oder nicht>",
  "hook": "<{HOOK_RULES}>",
+ "cta": "<{CTA_RULES}>",
  "caption": "<{CAPTION_RULES}>"}}"""})
     for attempt in range(2):
         try:
@@ -1049,7 +1055,7 @@ class Bot:
             hook = clean_hook(verdict.get("hook"), name)
             if not verdict.get("caption"):
                 verdict["caption"] = fallback_judge(name, login, words, st)["caption"]
-            out, info = cb.make_vertical(src, td, hook, words=words)
+            out, info = cb.make_vertical(src, td, hook, words=words, cta=CTA_DEFAULT)
             info_cap = (f"<b>⚡ {html.escape(name)}</b> · {verdict['score']}/10"
                         f"{' · 👥 Zuschauer-Clip' if job.get('viewer_clip') else ''}\n"
                         f"📝 {html.escape(verdict.get('reason', ''))}\n"
@@ -1236,16 +1242,17 @@ class Bot:
         for n, (cid, reason) in enumerate(ranking, 1):
             c, r = byid[cid], (byid[cid].get("deep") or {})
             hook = clean_hook(r.get("hook") or c.get("hook1"), c["name"])
+            cta = re.sub(r"#\w+|[„“”\"‚‘’»«]", "", r.get("cta") or "").replace("\n", " ").strip()[:70] or CTA_DEFAULT
             final = sel.LIB / f"{cid}_final.mp4"
             with tempfile.TemporaryDirectory() as td:
-                out, info = cb.make_vertical(sel.LIB / f"{cid}.mp4", Path(td), hook)
+                out, info = cb.make_vertical(sel.LIB / f"{cid}.mp4", Path(td), hook, cta=cta)
                 shutil.copy(out, final)
-            items.append({"n": n, "clip_id": cid, "name": c["name"], "login": c["login"], "hook": hook,
+            items.append({"n": n, "clip_id": cid, "name": c["name"], "login": c["login"], "hook": hook, "cta": cta,
                           "caption": r.get("caption") or c.get("caption1") or f"{c['name']} in GTA 6 😂\n\n#gta6",
                           "score": r.get("score", c["score1"]), "what": r.get("what") or c.get("what1", ""),
                           "why": reason or r.get("why", ""), "file": str(final), "dur": info["dur"],
                           "clip_url": c.get("clip_url", ""), "t": c["t"]})
-            log(f"  #{n} {c['name']} {items[-1]['score']}/10 – {hook}")
+            log(f"  #{n} {c['name']} {items[-1]['score']}/10 – {hook} | Ende: {cta}")
         if slot is not None:  # vorbereitet – pünktlich zur vollen Stunde schicken
             wait = (slot - dt.datetime.now()).total_seconds()
             if wait > 0:
@@ -1256,7 +1263,8 @@ class Bot:
                         f"raus, die anderen alle {C['push_gap_min']:.0f} min{tt_hint}", parse_html=True)
         for it in items:
             cap = (f"<b>#{it['n']}</b> · {html.escape(it['name'])} · {it['score']}/10\n"
-                   f"<b>{html.escape(it['hook'])}</b>\n💡 {html.escape(it['why'])}\n📝 {html.escape(it['what'])}")
+                   f"<b>{html.escape(it['hook'])}</b>\n👉 Ende: {html.escape(it.get('cta', ''))}\n"
+                   f"💡 {html.escape(it['why'])}\n📝 {html.escape(it['what'])}")
             try:
                 self.tg.video(Path(it["file"]), cap[:1000], cb.W, cb.H, it["dur"])
             except Exception as e:

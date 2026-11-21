@@ -381,12 +381,12 @@ def render(src: Path, ass: Path, out: Path, layout: dict, maxrate: float = 4.5) 
     subprocess.run(cmd, check=True, timeout=900)
 
 
-def make_vertical(src: Path, workdir: Path, hook: str, credit: str = "", words=None) -> tuple[Path, dict]:
+def make_vertical(src: Path, workdir: Path, hook: str, credit: str = "", words=None, cta: str = "") -> tuple[Path, dict]:
     """Neuer Look: oben Facecam, unten Gameplay, Titel in der Mitte; keine Untertitel, kein Credit."""
     import overlay
     info = probe(src)
     out = workdir / "out.mp4"
-    info["layout"] = overlay.render_short_fit(src, out, info["dur"], hook)
+    info["layout"] = overlay.render_short_fit(src, out, info["dur"], hook, cta=cta)
     info["words"] = len(words or [])
     log(f"  Layout: {info['layout']}")
     return out, info
