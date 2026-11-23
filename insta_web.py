@@ -28,7 +28,7 @@ POST_ITEM = re.compile(r"^\s*(Beitrag|Post)\s*$", re.I)
 NEXT = re.compile(r"^\s*(Weiter|Next)\s*$", re.I)
 SHARE = re.compile(r"^\s*(Teilen|Share)\s*$", re.I)
 OK_BTN = re.compile(r"^\s*(OK)\s*$", re.I)
-CROP = re.compile(r"(Zuschneiden|Select crop|Crop)", re.I)
+CROP = re.compile(r"(Zuschnitt auswählen|Select crop)", re.I)
 ORIGINAL = re.compile(r"^\s*(Original)\s*$", re.I)
 DISMISS = re.compile(r"^\s*(Jetzt nicht|Not now|Optionale Cookies ablehnen|Decline optional cookies|"
                      r"Nur erforderliche Cookies erlauben|Only allow essential cookies)\s*$", re.I)
@@ -274,7 +274,8 @@ def _post(video: Path, caption: str, log=print, headless: bool = True, dry_run: 
             # 3. Format „Original“ (9:16 bleibt 9:16)
             crop = page.get_by_role("button", name=CROP)
             if not _visible(crop):
-                crop = page.locator("svg[aria-label*='Zuschneiden'], svg[aria-label*='crop']").first.locator("xpath=..")
+                crop = page.locator("svg[aria-label='Zuschnitt auswählen'], svg[aria-label='Select crop']").first \
+                    .locator("xpath=ancestor::*[@role='button' or self::button][1]")
             snap("2_vor_format")
             try:
                 _click(crop.first, tries=1)
