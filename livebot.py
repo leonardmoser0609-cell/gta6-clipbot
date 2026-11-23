@@ -112,6 +112,18 @@ C = {
 CHEAP_MODEL = "claude-haiku-5-5"
 
 
+def always_watch() -> list[str]:
+    """Streamer, die immer beobachtet werden (egal ob Top 5 / Mindestzuschauer) und deren Clips sofort kommen."""
+    try:
+        return json.loads((STATE / "always.json").read_text())["logins"]
+    except Exception:
+        return [x.strip().lower() for x in (os.getenv("ALWAYS_WATCH") or "").split(",") if x.strip()]
+
+
+def set_always_watch(logins: list[str]) -> None:
+    (STATE / "always.json").write_text(json.dumps({"logins": logins}))
+
+
 def all_categories() -> bool:
     return C["game"].strip().lower() in ("", "alle", "all", "*")
 
@@ -906,6 +918,8 @@ class Bot:
         self.yt_times: collections.deque = collections.deque()
         self.busy = False
         self.digest_busy = False
+        self.instant_busy = 0
+        self.instant_lock = threading.Lock()
         self.pending_file = STATE / "pending.json"
         self.plock = threading.Lock()
         try:
@@ -926,6 +940,14 @@ class Bot:
         n = int(C["top_n"])
         self.top_list = self.tw.top_streams(self.game_id, C["lang"], max(10, n))
         top = [s for s in self.top_list[:n] if s["viewer_count"] >= C["min_viewers"]]
+        fav = always_watch()
+        if fav:
+            try:
+                live = self.tw.get("streams", user_login=fav[:100], type="live", first=100)["data"]
+                have = {s["user_login"].lower() for s in top}
+                top += [s for s in live if s["user_login"].lower() not in have]
+            except Exception as e:
+                log(f"Lieblings-Streamer-Abfrage: {e}")
         new = {s["user_login"].lower(): s for s in top}
         if set(new) != set(self.streams):
             log("Top-Streams: " + (", ".join(f"{s['user_name']} ({s['viewer_count']})" for s in top) or "keine"))
@@ -1067,7 +1089,12 @@ class Bot:
                     "hook1": verdict.get("hook", ""), "what1": verdict.get("reason", ""),
                     "caption1": verdict.get("caption", ""), "status": "new"})
                 self.stats["candidates"] += 1
-                log(f"  📥 Kandidat für die nächste Top-10-Liste gespeichert ({verdict['score']}/10)")
+                if login.lower() in always_watch():
+                    sel.set_status([job["clip_id"]], "instant")
+                    log(f"  ⭐ {name}: Sofort-Clip ({verdict['score']}/10) – wird genau geprüft und direkt geschickt")
+                    threading.Thread(target=self.instant_clip, args=(job["clip_id"],), daemon=True).start()
+                else:
+                    log(f"  📥 Kandidat für die nächste Top-10-Liste gespeichert ({verdict['score']}/10)")
                 return
             now = time.time()
             while self.sent_times and self.sent_times[0] < now - 3600:
@@ -1375,6 +1402,45 @@ class Bot:
         finally:
             self.digest_busy = False
 
+    # --- Sofort-Clips (Lieblings-Streamer) -------------------------------
+    def instant_clip(self, cid: str) -> None:
+        self.instant_busy += 1
+        try:
+            with self.instant_lock:
+                c = next((x for x in sel.candidates(None) if x["clip_id"] == cid), None)
+                if not c:
+                    return
+                r = deep_review(c, deep_model()) or {}
+                if r and (r.get("score", 1) == 0 or subgift_moment([], [], r)):
+                    log(f"  ⭐ {c['name']}: genaue Prüfung sagt 0/10 bzw. Sub-Gifts – nicht geschickt")
+                    return
+                hook = clean_hook(r.get("hook") or c.get("hook1"), c["name"])
+                cta = re.sub(r"#\w+|[„“”\"‚‘’»«]", "", r.get("cta") or "").strip()[:70] or CTA_DEFAULT
+                final = sel.LIB / f"{cid}_final.mp4"
+                with tempfile.TemporaryDirectory() as td:
+                    out, info = cb.make_vertical(sel.LIB / f"{cid}.mp4", Path(td), hook, cta=cta)
+                    shutil.copy(out, final)
+                inst = sel.load_instant()
+                n = inst.get("counter", 0) + 1
+                iid = f"M{n}"
+                item = {"id": iid, "n": iid, "clip_id": cid, "name": c["name"], "login": c["login"], "hook": hook,
+                        "cta": cta, "caption": r.get("caption") or c.get("caption1") or f"{c['name']} 😂\n\n#twitch",
+                        "score": r.get("score", c["score1"]), "what": r.get("what") or c.get("what1", ""),
+                        "file": str(final), "dur": info["dur"], "t": c["t"], "created": time.time()}
+                inst["counter"] = n
+                inst.setdefault("items", {})[iid] = item
+                sel.save_instant(inst)
+                tt = " · mit TikTok: <code>/push {0} tiktok</code>".format(iid) if tiktok_web.ready() else ""
+                cap = (f"⚡ <b>{iid}</b> · {html.escape(c['name'])} · {item['score']}/10\n"
+                       f"<b>{html.escape(hook)}</b>\n👉 Ende: {html.escape(cta)}\n📝 {html.escape(item['what'])}\n\n"
+                       f"Posten: <code>/push {iid}</code>{tt}")
+                self.tg.video(final, cap[:1000], cb.W, cb.H, info["dur"])
+                log(f"  ⭐ Sofort-Clip {iid} geschickt: {c['name']} – {hook}")
+        except Exception as e:
+            log(f"  Sofort-Clip {cid[:20]} fehlgeschlagen: {e}")
+        finally:
+            self.instant_busy -= 1
+
     def send_list(self) -> None:
         d = sel.load_digest()
         if not d or not d.get("items"):
@@ -1389,6 +1455,8 @@ class Bot:
     def cleanup(self) -> None:
         keep = {it["clip_id"] for it in (sel.load_digest() or {}).get("items", [])}
         keep |= {e["clip_id"] for e in sel.load_schedule() if e.get("status") in ("geplant", "läuft")}
+        keep |= {it["clip_id"] for it in sel.load_instant().get("items", {}).values()
+                 if time.time() - it.get("created", 0) < 48 * 3600}
         n = sel.cleanup(keep)
         if n:
             log(f"Aufgeräumt: {n} alte Videodateien gelöscht")
@@ -1438,23 +1506,22 @@ class Bot:
         sel.save_schedule(sch)
 
     def cmd_push(self, arg: str) -> None:
-        d = sel.load_digest()
-        if not d or not d.get("items"):
-            self.tg.message("Noch keine Top-10-Liste da – die nächste kommt um "
-                            f"{sel.next_slot(C['digest_hours'], dt.datetime.now()):%H:%M} Uhr.")
-            return
+        d = sel.load_digest() or {}
         toks = re.findall(r"\w+", arg.lower())
-        nums = [int(t) for t in toks if t.isdigit()]
         tiktok = any(t in ("tiktok", "tt") for t in toks)
-        if not nums or len(nums) > 3 or len(set(nums)) != len(nums):
-            self.tg.message("So: /push 3 7 1 – bis zu 3 verschiedene Nummern aus der letzten Liste "
-                            "(der erste geht sofort raus). Mit TikTok: /push 3 7 1 tiktok")
+        refs = [t.upper() if t.startswith("m") else int(t) for t in toks if t.isdigit() or re.fullmatch(r"m\d+", t)]
+        if not refs or len(refs) > 3 or len(set(refs)) != len(refs):
+            self.tg.message("So: /push 3 7 1 – bis zu 3 verschiedene Nummern aus der letzten Liste, Sofort-Clips mit "
+                            "M davor (z. B. /push M2). Der erste geht sofort raus. Mit TikTok: /push 3 7 1 tiktok")
             return
-        items = {it["n"]: it for it in d["items"]}
-        bad = [n for n in nums if n not in items or not Path(items[n]["file"]).exists()]
+        items = {it["n"]: it for it in d.get("items", [])}
+        items.update(sel.load_instant().get("items", {}))
+        bad = [str(n) for n in refs if n not in items or not Path(items[n]["file"]).exists()]
         if bad:
-            self.tg.message(f"Nummer {', '.join(map(str, bad))} gibt es in der letzten Liste nicht (mehr).")
+            self.tg.message(f"Nummer {', '.join(bad)} gibt es nicht (mehr) – Zahlen beziehen sich auf die letzte "
+                            "Top-10-Liste, M-Nummern auf Sofort-Clips.")
             return
+        nums = refs
         tt_note = ""
         if tiktok and not tiktok_web.ready():
             tiktok, tt_note = False, "\n⚠️ TikTok ist nicht eingeloggt – geht nur auf YouTube und Instagram."
@@ -1519,10 +1586,18 @@ class Bot:
                     st = spike_stats(self.chat, login, now)
                     rate = f"Chat {st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
                     lock = " · 👥 Plan B" if self.noclip.get(login, 0) > now else ""
-                    lines.append(f"{i}. 👁 {s['user_name']} – {viewers} – {s.get('game_name', '')} – {rate}{lock}")
+                    star = "⭐" if login in always_watch() else "👁"
+                    lines.append(f"{i}. {star} {s['user_name']} – {viewers} – {s.get('game_name', '')} – {rate}{lock}")
                 else:
                     small = " (zu klein)" if i <= n and s["viewer_count"] < C["min_viewers"] else ""
                     lines.append(f"{i}. ▫️ {s['user_name']} – {viewers} – {s.get('game_name', '')}{small}")
+            listed = {s["user_login"].lower() for s in self.top_list[:max(10, n)]}
+            for login, s in self.streams.items():
+                if login not in listed:  # Lieblings-Streamer außerhalb der Top 10
+                    st = spike_stats(self.chat, login, now)
+                    rate = f"Chat {st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
+                    viewers = f"{s['viewer_count']:,}".replace(",", ".")
+                    lines.append(f"⭐ {s['user_name']} – {viewers} – {s.get('game_name', '')} – {rate}")
             if not self.top_list:
                 lines.append("Gerade keine passenden deutschen Streams live.")
             a = recent_activity(10)
@@ -1587,6 +1662,21 @@ class Bot:
                                 "/ig web bzw. /ig api")
         elif cmd == "/push":
             self.cmd_push(arg)
+        elif cmd == "/immer":
+            a = arg.strip().lower().lstrip("@").split("/")[-1]
+            fav = always_watch()
+            if not a:
+                msg = ("⭐ Immer beobachtet, Clips kommen sofort: " + (", ".join(fav) or "niemand")
+                       + "\nHinzufügen oder entfernen: /immer <twitch-name>")
+            elif a in fav:
+                fav.remove(a)
+                msg = f"⭐ {a} wird nicht mehr extra beobachtet."
+            else:
+                fav.append(a)
+                msg = f"⭐ {a} wird ab jetzt immer beobachtet (sobald live), Clips kommen sofort mit M-Nummer."
+            set_always_watch(fav)
+            self.refresh_now = True
+            self.tg.message(msg)
         elif cmd == "/plan":
             self.tg.message(self.plan_text(), parse_html=True)
         elif cmd == "/stop":
@@ -1666,7 +1756,8 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] · /plan · /stop · /digest (Liste sofort) · "
+            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] (Sofort-Clips: /push M2) · /immer <name> · "
+                            "/plan · /stop · /digest (Liste sofort) · "
                             "/pause · /resume · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
 
     # --- Hauptschleife ------------------------------------------------------
@@ -1730,7 +1821,7 @@ class Bot:
                 # Code/Config geändert -> sauber beenden, launchd startet neu
                 changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
                 if changed:
-                    if not self.busy and not self.pub_lock.locked() and not self.digest_busy:
+                    if not self.busy and not self.pub_lock.locked() and not self.digest_busy and not self.instant_busy:
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")

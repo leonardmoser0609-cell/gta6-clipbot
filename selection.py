@@ -23,6 +23,7 @@ DIGEST_FILE = STATE / "digest.json"
 SCHEDULE_FILE = STATE / "schedule.json"
 SLOTS_FILE = STATE / "digest_slots.json"
 COSTS_FILE = STATE / "costs.json"
+INSTANT_FILE = STATE / "instant.json"
 _lock = threading.RLock()
 
 # USD pro Million Tokens (Eingabe, Ausgabe)
@@ -189,3 +190,14 @@ def plan_times(n: int, start: dt.datetime, gap_min: int = 90, night=(1, 9)) -> l
             t = out[-1] + dt.timedelta(minutes=gap_min)
         out.append(t)
     return out
+
+
+def load_instant() -> dict:
+    return _read(INSTANT_FILE, {"counter": 0, "items": {}})
+
+
+def save_instant(d: dict) -> None:
+    with _lock:
+        cutoff = time.time() - 3 * 86400  # Sofort-Clips nach 3 Tagen vergessen (Nummern zählen weiter)
+        d["items"] = {k: v for k, v in d.get("items", {}).items() if v.get("created", 0) > cutoff}
+        _write(INSTANT_FILE, d)
