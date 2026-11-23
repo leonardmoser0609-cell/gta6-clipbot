@@ -1716,6 +1716,18 @@ class Bot:
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
+            if (STATE / "ig_dryrun").exists():  # Probelauf Instagram (privat) bis vor „Teilen“
+                (STATE / "ig_dryrun").unlink(missing_ok=True)
+                d = sel.load_digest() or {}
+                if d.get("items"):
+                    it = d["items"][0]
+
+                    def _dry(it=it):
+                        try:
+                            log(f"Instagram-Probelauf: {insta_web.post(Path(it['file']), it['caption'], log=log, dry_run=True)}")
+                        except Exception as e:
+                            log(f"Instagram-Probelauf fehlgeschlagen: {e}")
+                    threading.Thread(target=_dry, daemon=True).start()
             inject = STATE / "inject.json"
             if inject.exists():
                 try:

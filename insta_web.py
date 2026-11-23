@@ -219,8 +219,11 @@ def login(timeout_s: int = 900) -> bool:
         return True
 
 
-def post(video: Path, caption: str, log=print, headless: bool = True) -> str:
-    """Postet im Hintergrund; scheitert das unsichtbare Hochladen VOR „Teilen“, einmal mit Fenster."""
+def post(video: Path, caption: str, log=print, headless: bool = True, dry_run: bool = False) -> str:
+    """Postet im Hintergrund; scheitert das unsichtbare Hochladen VOR „Teilen“, einmal mit Fenster.
+    dry_run: alles bis vor „Teilen“, mit Bildschirmfotos jedes Schritts in logs/instagram."""
+    if dry_run:
+        return _post(video, caption, log, headless, dry_run=True)
     try:
         return _post(video, caption, log, headless)
     except (NeedsHuman, ProfileBusy):
@@ -232,7 +235,7 @@ def post(video: Path, caption: str, log=print, headless: bool = True) -> str:
         return _post(video, caption, log, False)
 
 
-def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
+def _post(video: Path, caption: str, log=print, headless: bool = True, dry_run: bool = False) -> str:
     if _busy():
         raise ProfileBusy("das Instagram-Browserfenster ist noch offen")
     from playwright.sync_api import sync_playwright
@@ -257,9 +260,14 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
             if _visible(sub):
                 _click(sub.first)
             # 2. Video auswählen
+            def snap(tag):
+                if dry_run:
+                    _dump(page, tag)
+            snap("0_erstellen")
             page.locator("input[type='file']").last.set_input_files(str(video), timeout=60_000)
             log("  Instagram: Video wird hochgeladen …")
-            time.sleep(4)
+            time.sleep(6)
+            snap("1_hochgeladen")
             ok = page.get_by_role("button", name=OK_BTN)  # „Videobeiträge werden jetzt als Reels geteilt“
             if _visible(ok):
                 _click(ok.first)
@@ -267,8 +275,11 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
             crop = page.get_by_role("button", name=CROP)
             if not _visible(crop):
                 crop = page.locator("svg[aria-label*='Zuschneiden'], svg[aria-label*='crop']").first.locator("xpath=..")
+            snap("2_vor_format")
             try:
                 _click(crop.first, tries=1)
+                time.sleep(1)
+                snap("3_formatmenue")
                 orig = page.get_by_text(ORIGINAL)
                 if _visible(orig):
                     _click(orig.first, tries=1)
@@ -281,6 +292,7 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
                 t0 = time.time()
                 while not _visible(nxt) and time.time() - t0 < 120:
                     time.sleep(2)
+                snap(f"{4 + step}_vor_weiter")
                 _click(nxt.first)
                 time.sleep(3)
             # 5. Caption
@@ -291,6 +303,9 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
             _click(cap)
             page.keyboard.type(caption.strip(), delay=20)  # Zeilenumbruch nur nach dem Satz, nicht nach Hashtags
             time.sleep(2)
+            snap("6_caption")
+            if dry_run:
+                return "Probelauf bis vor „Teilen“ – Bilder in logs/instagram"
             # 6. Teilen
             share = page.get_by_role("button", name=SHARE)
             shared = True
