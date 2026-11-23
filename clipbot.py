@@ -401,6 +401,7 @@ class Telegram:
     def __init__(self, token: str, chat_id: str | None):
         self.base = f"https://api.telegram.org/bot{token}/"
         self.chat_id = chat_id or self._discover_chat()
+        self.silent = os.getenv("TG_SILENT", "0") == "1"  # Nachrichten ohne Ton/Push (außer notify=True)
 
     def _discover_chat(self) -> str:
         r = requests.get(self.base + "getUpdates", timeout=20).json()
@@ -411,20 +412,22 @@ class Telegram:
                 return str(chat["id"])
         raise RuntimeError("Keine Telegram-Chat-ID: Schreib dem Bot einmal 'hi' oder setze TELEGRAM_CHAT_ID")
 
-    def message(self, text: str, parse_html: bool = False) -> None:
-        data = {"chat_id": self.chat_id, "text": text[:4000], "disable_web_page_preview": "true"}
+    def message(self, text: str, parse_html: bool = False, notify: bool = False) -> None:
+        data = {"chat_id": self.chat_id, "text": text[:4000], "disable_web_page_preview": "true",
+                "disable_notification": "true" if self.silent and not notify else "false"}
         if parse_html:
             data["parse_mode"] = "HTML"
         r = requests.post(self.base + "sendMessage", data=data, timeout=30)
         if not r.ok:
             raise RuntimeError(f"Telegram sendMessage {r.status_code}: {r.text[:200]}")
 
-    def video(self, path: Path, caption_html: str, w: int, h: int, dur: float) -> None:
+    def video(self, path: Path, caption_html: str, w: int, h: int, dur: float, notify: bool = False) -> None:
         with open(path, "rb") as f:
             r = requests.post(
                 self.base + "sendVideo",
                 data={"chat_id": self.chat_id, "caption": caption_html[:1024], "parse_mode": "HTML",
-                      "supports_streaming": "true", "width": w, "height": h, "duration": int(dur)},
+                      "supports_streaming": "true", "width": w, "height": h, "duration": int(dur),
+                      "disable_notification": "true" if self.silent and not notify else "false"},
                 files={"video": (path.name, f, "video/mp4")},
                 timeout=600,
             )

@@ -893,6 +893,10 @@ def instagram_reel(path: Path, caption: str) -> str:
 class Bot:
     def __init__(self):
         self.tg = cb.Telegram(os.environ["TELEGRAM_BOT_TOKEN"], os.getenv("TELEGRAM_CHAT_ID"))
+        try:  # /leise überlebt Neustarts
+            self.tg.silent = json.loads((STATE / "tg_silent.json").read_text())["silent"]
+        except Exception:
+            pass
         self.tw = cb.Twitch(CID, SECRET)
         self.ut = UserToken(self.tg)
         self.chat = Chat()
@@ -1434,7 +1438,7 @@ class Bot:
                 cap = (f"⚡ <b>{iid}</b> · {html.escape(c['name'])} · {item['score']}/10\n"
                        f"<b>{html.escape(hook)}</b>\n👉 Ende: {html.escape(cta)}\n📝 {html.escape(item['what'])}\n\n"
                        f"Posten: <code>/push {iid}</code>{tt}")
-                self.tg.video(final, cap[:1000], cb.W, cb.H, info["dur"])
+                self.tg.video(final, cap[:1000], cb.W, cb.H, info["dur"], notify=True)  # nur diese mit Ton
                 log(f"  ⭐ Sofort-Clip {iid} geschickt: {c['name']} – {hook}")
         except Exception as e:
             log(f"  Sofort-Clip {cid[:20]} fehlgeschlagen: {e}")
@@ -1662,6 +1666,12 @@ class Bot:
                                 "/ig web bzw. /ig api")
         elif cmd == "/push":
             self.cmd_push(arg)
+        elif cmd == "/leise":
+            a = arg.strip().lower()
+            self.tg.silent = a not in ("off", "aus", "0")
+            (STATE / "tg_silent.json").write_text(json.dumps({"silent": self.tg.silent}))
+            self.tg.message("🔕 Ab jetzt nur noch Sofort-Clips (⭐) mit Ton – alles andere kommt lautlos."
+                            if self.tg.silent else "🔔 Alle Nachrichten kommen wieder mit Ton.", notify=True)
         elif cmd == "/immer":
             a = arg.strip().lower().lstrip("@").split("/")[-1]
             fav = always_watch()
@@ -1756,7 +1766,7 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] (Sofort-Clips: /push M2) · /immer <name> · "
+            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] (Sofort-Clips: /push M2) · /immer <name> · /leise on|off · "
                             "/plan · /stop · /digest (Liste sofort) · "
                             "/pause · /resume · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
 
