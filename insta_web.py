@@ -140,6 +140,46 @@ def _check(page) -> None:
         raise NeedsHuman("Instagram will eine Bestätigung oder den Login – bitte Instagram-Login.command öffnen")
 
 
+def _latest_reel(page) -> tuple[str, str]:
+    """(Benutzername, Link zum neuesten Reel) über den Profil-Link in der Seitenleiste."""
+    page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+    time.sleep(3)
+    prof = page.get_by_role("link", name=re.compile(r"^\s*(Profil|Profile)\s*$", re.I))
+    href = prof.first.get_attribute("href") if _visible(prof) else ""
+    user = (href or "").strip("/").split("/")[0]
+    if not user:
+        return "", ""
+    page.goto(f"https://www.instagram.com/{user}/reels/", wait_until="domcontentloaded", timeout=60_000)
+    a = page.locator("a[href*='/reel/']").first
+    try:
+        a.wait_for(state="attached", timeout=20_000)
+        link = a.get_attribute("href") or ""
+    except Exception:
+        link = ""
+    if link.startswith("/"):
+        link = "https://www.instagram.com" + link
+    return user, link
+
+
+def whoami(log=print) -> tuple[str, str]:
+    """Kontoname + neuestes Reel (mit Bildschirmfoto in logs/instagram) – zum Prüfen nach dem Login."""
+    if _busy():
+        raise ProfileBusy("das Instagram-Browserfenster ist noch offen")
+    from playwright.sync_api import sync_playwright
+    with _LOCK, sync_playwright() as p:
+        ctx = _launch(p, True)
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        try:
+            user, link = _latest_reel(page)
+            if link:
+                page.goto(link, wait_until="domcontentloaded", timeout=60_000)
+                time.sleep(5)
+                _dump(page, "reel")
+            return user, link
+        finally:
+            ctx.close()
+
+
 def login(timeout_s: int = 900) -> bool:
     tw.ensure_installed(verbose=True)
     from playwright.sync_api import sync_playwright
@@ -229,6 +269,7 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
                     _click(orig.first, tries=1)
             except Exception:
                 log("  Instagram: Format-Auswahl nicht gefunden – nehme Standard")
+                _dump(page, "format")
             # 4. Weiter (Zuschnitt) → Weiter (Bearbeiten)
             for step in range(2):
                 nxt = page.get_by_role("button", name=NEXT)
@@ -260,8 +301,12 @@ def _post(video: Path, caption: str, log=print, headless: bool = True) -> str:
                 time.sleep(3)
             else:
                 raise RuntimeError("keine Bestätigung von Instagram nach dem Teilen")
-            time.sleep(2)
-            return "gepostet (neuestes Reel im Profil)"
+            time.sleep(4)
+            try:
+                _, link = _latest_reel(page)
+            except Exception:
+                link = ""
+            return link or "gepostet (neuestes Reel im Profil)"
         except Exception as e:
             shot = _dump(page, "fehler")
             log(f"  Instagram: Bildschirmfoto vom Fehler in logs/instagram/{shot.name if shot else '-'}")

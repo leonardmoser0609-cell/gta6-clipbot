@@ -1670,6 +1670,14 @@ class Bot:
         threading.Thread(target=self.commands, daemon=True).start()
         if C["mode"] == "digest":
             threading.Thread(target=self.add_missing_cta, daemon=True).start()
+        if ig_mode() == "web" and insta_web.ready():
+            def _ig_probe():
+                try:
+                    user, link = insta_web.whoami(log=log)
+                    log(f"Instagram (privat): Konto @{user or '?'} · neuestes Reel: {link or '–'}")
+                except Exception as e:
+                    log(f"Instagram (privat) Prüfung: {e}")
+            threading.Thread(target=_ig_probe, daemon=True).start()
         last_start = STATE / "last_start"
         try:
             quiet = time.time() - float(last_start.read_text()) < 900  # Neustart nach Update: still
