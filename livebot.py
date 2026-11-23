@@ -62,6 +62,7 @@ load_env(ROOT / ".env")
 import clipbot as cb  # noqa: E402
 import tiktok_web  # noqa: E402
 import selection as sel  # noqa: E402
+import insta_web  # noqa: E402
 
 def _f(name, default):
     try:
@@ -769,6 +770,14 @@ def ig_enabled() -> bool:
     return bool(os.getenv("META_PAGE_TOKEN") and os.getenv("IG_USER_ID"))
 
 
+def ig_mode() -> str:
+    """'api' = Business-Konto über die Graph-API, 'web' = privates Konto über instagram.com."""
+    try:
+        return json.loads((STATE / "ig_mode.json").read_text())["mode"]
+    except Exception:
+        return (os.getenv("IG_MODE") or "api").lower()
+
+
 def ig_trim(src: Path, max_s: float) -> Path:
     """Instagram-API nimmt bei diesem Konto nur ~50 s: vorne kürzen, das Ende (Höhepunkt) bleibt."""
     import overlay
@@ -1186,6 +1195,9 @@ class Bot:
         if len(self.ig_times) >= C["ig_max_per_day"]:
             log("  Instagram: Tageslimit erreicht – nicht hochgeladen")
             return
+        if ig_mode() == "web":
+            self.post_instagram_web(out, verdict)
+            return
         try:
             url = instagram_reel(ig_trim(out, C["ig_max_seconds"]), verdict.get("caption", ""))
             self.ig_times.append(time.time())
@@ -1198,6 +1210,29 @@ class Bot:
                 self.tg.message(f"⚠️ Instagram-Upload fehlgeschlagen: {str(e)[:300]}")
             except Exception:
                 pass
+
+    def post_instagram_web(self, out: Path, verdict: dict) -> None:
+        """Privates Konto: Reel über instagram.com (unsichtbar im Hintergrund)."""
+        if not insta_web.ready():
+            log("  Instagram (privat): nicht eingeloggt – übersprungen")
+            self.tg.message("⚠️ Instagram (privates Konto) ist nicht eingeloggt – bitte am Mac "
+                            "„Instagram-Login.command“ doppelklicken.")
+            return
+        try:
+            res = insta_web.post(out, verdict.get("caption", ""), log=log, headless=C["tt_headless"])
+            self.ig_times.append(time.time())
+            self.stats["instagram"] += 1
+            log(f"  📸 Instagram (privat): {res}")
+            self.tg.message(f"📸 Auf Instagram (privates Konto): {res}")
+        except insta_web.ProfileBusy as e:
+            log(f"  Instagram übersprungen: {e}")
+            self.tg.message("ℹ️ Instagram wartet: Bitte das Instagram-Browserfenster am Mac schließen.")
+        except insta_web.NeedsHuman as e:
+            log(f"  Instagram pausiert: {e}")
+            self.tg.message(f"⏸ Instagram: {e}. Danach geht es mit dem nächsten Post weiter.")
+        except Exception as e:
+            log(f"  Instagram-Upload (privat) fehlgeschlagen: {str(e)[:300]}")
+            self.tg.message(f"⚠️ Instagram-Upload (privates Konto) fehlgeschlagen: {str(e)[:250]}")
 
     # --- Telegram-Befehle ---------------------------------------------------
     # --- Top-10-Listen ----------------------------------------------------
@@ -1489,7 +1524,9 @@ class Bot:
                 lines.append(f"🤖 KI: Vorauswahl {stage1_model()} · genaue Prüfung {deep_model()} · heute "
                              f"{sel.cost_today():.2f} $ · seit {C['cycle_start']} {sel.cost_since(C['cycle_start']):.2f} $ "
                              f"von {C['cycle_budget']:.0f} $")
+                igm = ("privat" + ("" if insta_web.ready() else ", nicht eingeloggt")) if ig_mode() == "web" else "Business"
                 lines.append(f"Bei /push: YouTube {'an' if self.yt_on else 'aus'} · Instagram {'an' if self.ig_on else 'aus'}"
+                             f" ({igm})"
                              f" · TikTok {'nur mit „tiktok“' if tiktok_web.ready() else 'nicht eingeloggt'}")
             else:
                 lines.append(f"⏱ Letzte 10 min: {a['moments']} Momente erkannt · {a['clips']} Clips erstellt · "
@@ -1514,11 +1551,22 @@ class Bot:
                 self.yt_on = arg.strip().lower() not in ("off", "aus", "0")
                 self.tg.message(f"YouTube-Autoupload {'an ▶️' if self.yt_on else 'aus ⏸'}")
         elif cmd == "/ig":
-            if not ig_enabled():
+            a = arg.strip().lower()
+            if a in ("web", "privat", "api", "business"):
+                mode = "web" if a in ("web", "privat") else "api"
+                (STATE / "ig_mode.json").write_text(json.dumps({"mode": mode}))
+                self.ig_on = True
+                extra = "" if mode == "api" or insta_web.ready() else \
+                    "\n⚠️ Noch nicht eingeloggt – am Mac „Instagram-Login.command“ doppelklicken."
+                self.tg.message(f"📸 Instagram postet jetzt über "
+                                f"{'das private Konto (Webseite)' if mode == 'web' else 'das Business-Konto (API)'}.{extra}")
+            elif not ig_enabled() and ig_mode() == "api":
                 self.tg.message("Instagram ist nicht verbunden.")
             else:
-                self.ig_on = arg.strip().lower() not in ("off", "aus", "0")
-                self.tg.message(f"Instagram-Autoupload {'an 📸' if self.ig_on else 'aus ⏸'}")
+                self.ig_on = a not in ("off", "aus", "0")
+                self.tg.message(f"Instagram {'an 📸' if self.ig_on else 'aus ⏸'} · Konto: "
+                                f"{'privat (Webseite)' if ig_mode() == 'web' else 'Business (API)'} – umschalten mit "
+                                "/ig web bzw. /ig api")
         elif cmd == "/push":
             self.cmd_push(arg)
         elif cmd == "/plan":
