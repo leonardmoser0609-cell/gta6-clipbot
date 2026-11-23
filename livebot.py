@@ -71,7 +71,8 @@ def _f(name, default):
 
 
 C = {
-    "game": os.getenv("GAME_NAME", "Grand Theft Auto VI"),  # leer/"alle" = alle Kategorien (Twitch Highlights DE)
+    "game": os.getenv("GAME_NAME", "Grand Theft Auto VI"),
+    "min_viewers": _f("MIN_VIEWERS", 0),                   # kleinere Streams werden nicht geclippt  # leer/"alle" = alle Kategorien (Twitch Highlights DE)
     "lang": os.getenv("STREAM_LANGUAGE") or "de",
     "top_n": _f("TOP_N", 5),
     "refresh_s": _f("REFRESH_S", 60),
@@ -924,7 +925,7 @@ class Bot:
             self.app_token_born = time.time()
         n = int(C["top_n"])
         self.top_list = self.tw.top_streams(self.game_id, C["lang"], max(10, n))
-        top = self.top_list[:n]
+        top = [s for s in self.top_list[:n] if s["viewer_count"] >= C["min_viewers"]]
         new = {s["user_login"].lower(): s for s in top}
         if set(new) != set(self.streams):
             log("Top-Streams: " + (", ".join(f"{s['user_name']} ({s['viewer_count']})" for s in top) or "keine"))
@@ -1508,7 +1509,8 @@ class Bot:
         if cmd == "/status":
             now = time.time()
             n = int(C["top_n"])
-            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · {game_label()} · geclippt wird Top {n} "
+            mv = f" ab {C['min_viewers']:,.0f} Zuschauern".replace(",", ".") if C["min_viewers"] else ""
+            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · {game_label()} · geclippt wird Top {n}{mv} "
                      f"(ändern: /erweitere 6)"]
             for i, s in enumerate(self.top_list[:max(10, n)], 1):
                 login = s["user_login"].lower()
@@ -1519,7 +1521,8 @@ class Bot:
                     lock = " · 👥 Plan B" if self.noclip.get(login, 0) > now else ""
                     lines.append(f"{i}. 👁 {s['user_name']} – {viewers} – {s.get('game_name', '')} – {rate}{lock}")
                 else:
-                    lines.append(f"{i}. ▫️ {s['user_name']} – {viewers} – {s.get('game_name', '')}")
+                    small = " (zu klein)" if i <= n and s["viewer_count"] < C["min_viewers"] else ""
+                    lines.append(f"{i}. ▫️ {s['user_name']} – {viewers} – {s.get('game_name', '')}{small}")
             if not self.top_list:
                 lines.append("Gerade keine passenden deutschen Streams live.")
             a = recent_activity(10)
