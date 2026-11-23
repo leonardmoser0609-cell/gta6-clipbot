@@ -136,14 +136,15 @@ class Twitch:
             return data[0]["id"]
         raise RuntimeError(f"Twitch-Kategorie '{name}' nicht gefunden")
 
-    def top_streams(self, game_id: str, language: str, n: int) -> list[dict]:
+    def top_streams(self, game_id: str | None, language: str, n: int) -> list[dict]:
+        """Größte Live-Streams einer Sprache – mit game_id nur diese Kategorie, ohne (None) alle Kategorien."""
         data = self.get("streams", game_id=game_id, language=language, type="live",
                         first=min(100, max(n, 20)))["data"]
         return sorted(data, key=lambda s: s["viewer_count"], reverse=True)[:n]
 
-    def streams_for_logins(self, logins: list[str], game_id: str) -> list[dict]:
+    def streams_for_logins(self, logins: list[str], game_id: str | None) -> list[dict]:
         data = self.get("streams", user_login=logins[:100], type="live", first=100)["data"]
-        data = [s for s in data if s.get("game_id") == game_id]
+        data = [s for s in data if not game_id or s.get("game_id") == game_id]
         return sorted(data, key=lambda s: s["viewer_count"], reverse=True)
 
     def clips(self, broadcaster_id: str, start: dt.datetime, end: dt.datetime) -> list[dict]:

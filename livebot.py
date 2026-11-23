@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-GTA 6 Live-Clipper
-==================
-Beobachtet dauerhaft die Top-5 deutschen Live-Streams in der Twitch-Kategorie
-GTA VI, liest deren Chat mit und erkennt Hype-Momente (Chat explodiert,
-KEKW/LUL/WTF-Spam). In dem Moment erstellt der Bot selbst einen Twitch-Clip,
-transkribiert ihn, lässt ihn (optional) von Claude bewerten, rendert ihn 9:16
-mit Untertiteln und schickt ihn samt Caption per Telegram.
+Twitch Highlights DE – Live-Clipper
+===================================
+Beobachtet dauerhaft die größten deutschen Live-Streams (alle Kategorien, oder eine feste Kategorie
+über GAME_NAME), liest deren Chat mit und erkennt Hype-Momente. Dann erstellt der Bot einen Twitch-Clip,
+transkribiert ihn, lässt ihn von Claude vorbewerten und sammelt ihn als Kandidaten. Um 10/15/20/23 Uhr
+prüft ein starkes Modell die besten genau und schickt eine Top-10-Liste per Telegram; /push postet.
 
 Start:  python livebot.py
 Konfiguration: .env im selben Ordner (siehe README).
@@ -72,7 +71,7 @@ def _f(name, default):
 
 
 C = {
-    "game": os.getenv("GAME_NAME") or "Grand Theft Auto VI",
+    "game": os.getenv("GAME_NAME", "Grand Theft Auto VI"),  # leer/"alle" = alle Kategorien (Twitch Highlights DE)
     "lang": os.getenv("STREAM_LANGUAGE") or "de",
     "top_n": _f("TOP_N", 5),
     "refresh_s": _f("REFRESH_S", 60),
@@ -88,7 +87,7 @@ C = {
     "min_score": _f("MIN_SCORE", 6),
     "anthropic_key": os.getenv("ANTHROPIC_API_KEY") or "",
     "anthropic_model": os.getenv("ANTHROPIC_MODEL") or "claude-haiku-5-5",
-    "hashtags": os.getenv("HASHTAGS") or "#gta6 #gtavi #gta #twitchclips #gaming #fyp",
+    "hashtags": os.getenv("HASHTAGS") or "#twitch #twitchclips #twitchdeutschland #gaming",
     "yt_min_score": _f("YT_MIN_SCORE", 6),
     "yt_max_per_day": _f("YT_MAX_PER_DAY", 60),
     "ig_min_score": _f("IG_MIN_SCORE", 6),
@@ -110,6 +109,18 @@ C = {
     "stage1_until": os.getenv("STAGE1_MODEL_UNTIL") or "",  # danach Vorauswahl wieder mit Haiku
 }
 CHEAP_MODEL = "claude-haiku-5-5"
+
+
+def all_categories() -> bool:
+    return C["game"].strip().lower() in ("", "alle", "all", "*")
+
+
+def game_label() -> str:
+    return "alle Kategorien" if all_categories() else C["game"]
+
+
+def is_gta(*texts) -> bool:
+    return any(re.search(r"gta|grand theft auto", t or "", re.I) for t in texts)
 
 
 def stage1_model() -> str:
@@ -490,7 +501,7 @@ def transcript_lines(words, win: tuple[float, float], limit: int = 3500) -> str:
 
 
 def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
-             src: Path | None = None, dur: float = 0, viewer_clip: bool = False) -> dict | None:
+             src: Path | None = None, dur: float = 0, viewer_clip: bool = False, category: str = "") -> dict | None:
     if not C["anthropic_key"]:
         return None
     peak, clear = find_climax(src, dur) if (src is not None and dur) else (max(0.0, dur - 6), False)
@@ -506,9 +517,9 @@ def ai_judge(streamer: str, words, chat_lines: list[str], st: dict, title: str,
             tag = "Vorgeschichte" if i < 3 else "HÖHEPUNKT"
             content.append({"type": "text", "text": f"Standbild bei {t:.1f}s ({tag}):"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
-    other_game_rule = ("Nur wenn auf den Bildern eindeutig ein ANDERES Spiel (z. B. Minecraft) oder gar kein Spiel "
-                       "zu sehen ist, gib score 0.\n") if viewer_clip else ""
-    content.append({"type": "text", "text": f"""Oben siehst du Standbilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {streamer} (GTA 6, deutscher Stream).
+    other_game_rule = (f"Nur wenn auf den Bildern eindeutig etwas ganz anderes als die Kategorie „{category}“ "
+                       "zu sehen ist (z. B. ein altes Video eines anderen Spiels), gib score 0.\n") if viewer_clip else ""
+    content.append({"type": "text", "text": f"""Oben siehst du Standbilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {streamer} (Kategorie: {category or 'unbekannt'}, deutscher Stream).
 
 Stream-Titel: {title}
 Höhepunkt des Clips: {peak_txt}. Die ersten 3 Bilder zeigen die Vorgeschichte, die 5 mit HÖHEPUNKT markierten liegen dicht um den Höhepunkt.
@@ -525,8 +536,8 @@ Aufgabe: Finde heraus, WAS im HÖHEPUNKT konkret passiert (Handlung im Spiel und
 Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 {{"what": "<1 Satz: was im Höhepunkt passiert (mit kurzer Vorgeschichte), sachlich>",
  "score": <1-10: wie unterhaltsam/viral für Leute, die den Streamer nicht kennen>,
- "hook": "<Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht eindeutig zu erkennen, was im Höhepunkt passiert, leite den Titel aus dem ab, was der Streamer dort sagt oder ruft (Zeilen mit »HÖHEPUNKT«) – aber sinngemäß in eigenen Worten, NIE als wörtliches Zitat (das Transkript ist oft ungenau), z. B. 'Trymacs verliert sein Boot in GTA 6 😂'. Keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist (sonst keine). Keine Hashtags, kein Clickbait, das nicht stimmt>",
- "caption": "<Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, KEIN Credit>"}}"""})
+ "hook": "<{HOOK_RULES}>",
+ "caption": "<{CAPTION_RULES}>"}}"""})
     text = ""
     model = stage1_model()
     for attempt in range(2):
@@ -547,23 +558,24 @@ Antworte IMMER und NUR mit JSON, auch wenn der Clip unbrauchbar ist:
 
 
 HOOK_RULES = ("Titel mitten im Video, Deutsch, normale Groß-/Kleinschreibung, 3-10 Wörter, beschreibt GENAU den "
-              "Höhepunkt (nicht die Vorgeschichte) mit Streamernamen und endet mit 'in GTA 6', z. B. 'Trymacs überfährt "
-              "Rentner in GTA 6 😂😭' oder 'Monte wird von der Polizei verhaftet in GTA 6 💀'. Ist auf den Bildern nicht "
-              "eindeutig zu erkennen, was passiert, leite ihn sinngemäß aus dem Gesagten im Höhepunkt ab – NIE als "
-              "wörtliches Zitat, keine Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist. Keine "
-              "Hashtags, kein Clickbait, das nicht stimmt")
+              "Höhepunkt (nicht die Vorgeschichte) mit Streamernamen. Das Spiel nur nennen, wenn es den Titel stärker "
+              "macht, z. B. 'Trymacs überfährt Rentner in GTA 6 😂😭', 'Papaplatte rastet bei Valorant-Clutch aus 💀' "
+              "oder ohne Spiel 'Monte verliert 10.000 € beim Wetten 😭'. Ist auf den Bildern nicht eindeutig zu erkennen, "
+              "was passiert, leite ihn sinngemäß aus dem Gesagten im Höhepunkt ab – NIE als wörtliches Zitat, keine "
+              "Anführungszeichen. Am Ende 1-2 passende Emojis, wenn der Moment witzig ist. Keine Hashtags, kein "
+              "Clickbait, das nicht stimmt")
 CTA_DEFAULT = "Folge für mehr Clips deiner Lieblingsstreamer 🎮"
 CTA_RULES = ("Call-to-Action für die letzten 3 Sekunden des Videos: Deutsch, höchstens 8 Wörter, fordert zum Folgen auf, "
-             "gern witzig und passend zum Clip mit GTA-6-Bezug (z. B. Lucia, Mandy, Jason, Vice City), z. B. 'Folge für "
-             "mehr Clips deiner Lieblingsstreamer 🎮' oder 'Folge – dann klappt es auch mit Lucia 😏'. Genau 1 Emoji, "
-             "keine Anführungszeichen, keine Hashtags")
+             "gern witzig und passend zum Clip – bei GTA 6 z. B. mit Lucia, Mandy, Jason oder Vice City, sonst passend zu "
+             "Streamer, Spiel oder Situation. Beispiele: 'Folge für mehr Clips deiner Lieblingsstreamer 🎮', 'Folge – "
+             "dann klappt es auch mit Lucia 😏'. Genau 1 Emoji, keine Anführungszeichen, keine Hashtags")
 CAPTION_RULES = ("Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 "
-                 "passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #gta6 und dem Streamernamen. KEIN Link, "
-                 "KEIN Credit")
+                 "passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #twitch, dem Streamernamen und – wenn "
+                 "ein Spiel läuft – dem Spiel (z. B. #gta6). KEIN Link, KEIN Credit")
 
 
 def clean_hook(hook: str | None, name: str) -> str:
-    return re.sub(r"#\w+|[„“”\"‚‘’»«]", "", hook or "").replace("\n", " ").strip()[:90] or f"{name} in GTA 6 😂"
+    return re.sub(r"#\w+|[„“”\"‚‘’»«]", "", hook or "").replace("\n", " ").strip()[:90] or f"{name} eskaliert im Stream 😂"
 
 
 def deep_review(c: dict, model: str) -> dict | None:
@@ -586,8 +598,8 @@ def deep_review(c: dict, model: str) -> dict | None:
     peak_txt = (f"ca. Sekunde {peak:.0f} (lauteste Stelle)" if clear
                 else f"Sekunde {w0:.0f}–{w1:.0f} (keine eindeutig laute Stelle)")
     chat_txt = "\n".join(c.get("chat", [])[-60:])[:3000] or "(nicht verfügbar)"
-    content.append({"type": "text", "text": f"""Du bist Redakteur eines deutschen GTA-6-Clip-Kanals (YouTube Shorts, Instagram Reels, TikTok).
-Oben: 16 Bilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {c['name']} – 4 aus der Vorgeschichte, 12 dicht um den Höhepunkt ({peak_txt}).
+    content.append({"type": "text", "text": f"""Du bist Redakteur des Kanals „Twitch Highlights DE“ (YouTube Shorts, Instagram Reels, TikTok) mit den besten Momenten deutscher Twitch-Streamer.
+Oben: 16 Bilder aus einem {dur:.0f}-Sekunden-Twitch-Clip von {c['name']} (Kategorie: {c.get('category') or 'unbekannt'}) – 4 aus der Vorgeschichte, 12 dicht um den Höhepunkt ({peak_txt}).
 
 Stream-Titel: {c.get('stream_title', '')}
 Chat-Reaktion: {st.get('factor', 0):.1f}x so viel wie normal, {st.get('hype', 0)*100:.0f}% Hype-Nachrichten, {c.get('viewers', 0)} Zuschauer live
@@ -625,16 +637,16 @@ def rank_candidates(items: list[dict], model: str, n: int = 10) -> list[tuple[st
     for c in items:
         r = c.get("deep") or {}
         lines.append(f"- id={c['clip_id']} | {c['name']} | {time.strftime('%H:%M', time.localtime(c['t']))} Uhr | "
-                     f"Note {r.get('score', c['score1'])}/10 | Chat {c.get('stats', {}).get('factor', 0):.1f}x | "
+                     f"{c.get('category', '')} | Note {r.get('score', c['score1'])}/10 | Chat {c.get('stats', {}).get('factor', 0):.1f}x | "
                      f"Titel: {r.get('hook') or c.get('hook1', '')} | Was: {r.get('what') or c.get('what1', '')} | "
                      f"Warum: {r.get('why', '')}")
-    prompt = f"""Hier sind {len(items)} geprüfte GTA-6-Clip-Kandidaten deutscher Twitch-Streamer:
+    prompt = f"""Hier sind {len(items)} geprüfte Clip-Kandidaten deutscher Twitch-Streamer für „Twitch Highlights DE“:
 {chr(10).join(lines)}
 
 Wähle bis zu {n} für die Auswahlliste, beste zuerst. Regeln:
 - Qualität und Viralität für Leute, die die Streamer nicht kennen, gehen vor.
 - Doppelte Momente (gleicher Streamer, gleiche Szene, wenige Minuten auseinander) nur einmal – den besseren.
-- Bei ähnlicher Qualität für Abwechslung bei den Streamern sorgen.
+- Bei ähnlicher Qualität für Abwechslung bei Streamern und Spielen sorgen.
 Antworte NUR mit JSON: {{"ranking": [{{"id": "<id>", "reason": "<1 kurzer Satz>"}}]}}"""
     known = {c["clip_id"] for c in items}
     try:
@@ -708,8 +720,8 @@ def recent_activity(minutes: int = 10) -> dict:
 
 def fallback_judge(streamer: str, login: str, words, st: dict) -> dict:
     score = min(10, round(2 + st["factor"] * 1.2 + st["hype"] * 3))
-    hook = f"{streamer} in GTA 6 😂"
-    caption = (f"{streamer} in GTA 6 😂🔥\n\n"
+    hook = f"{streamer} eskaliert im Stream 😂"
+    caption = (f"{streamer} eskaliert komplett 😂🔥\n\n"
                f"{C['hashtags']} #{re.sub(r'[^0-9a-zA-Z_]', '', login)}")
     return {"score": score, "reason": f"Chat {st['factor']:.1f}x, {st['hype']*100:.0f}% Hype",
             "hook": hook, "caption": caption}
@@ -902,7 +914,7 @@ class Bot:
         self.sent_times: collections.deque = collections.deque()
         self.paused = False
         self.stats = collections.Counter()
-        self.game_id = os.getenv("GAME_ID") or self.tw.game_id(C["game"])
+        self.game_id = None if all_categories() else (os.getenv("GAME_ID") or self.tw.game_id(C["game"]))
         self.app_token_born = time.time()
 
     # --- Streams aktualisieren -------------------------------------------
@@ -977,7 +989,7 @@ class Bot:
                     created = dt.datetime.strptime(c["created_at"], fmt).replace(tzinfo=dt.timezone.utc).timestamp()
                 except Exception:
                     continue
-                if str(c.get("game_id")) != str(self.game_id):  # z. B. Clip aus altem Minecraft-VOD
+                if str(c.get("game_id")) != str(s.get("game_id")):  # z. B. Clip aus altem Minecraft-VOD
                     continue
                 if c["id"] not in self.used_clips and t_spike - 60 <= created <= t_spike + 180:
                     cands.append(c)
@@ -1030,7 +1042,7 @@ class Bot:
             words = cb.transcribe(src)
             dur = cb.probe(src)["dur"]
             verdict = ai_judge(name, words, job["chat"], st, s.get("title", ""), src, dur,
-                               viewer_clip=bool(job.get("viewer_clip"))) \
+                               viewer_clip=bool(job.get("viewer_clip")), category=s.get("game_name", "")) \
                 or fallback_judge(name, login, words, st)
             log(f"  Bewertung {verdict['score']}/10 – {verdict.get('reason', '')}")
             if verdict["score"] < C["min_score"] and not job.get("force"):
@@ -1047,6 +1059,7 @@ class Bot:
                 sel.save_candidate({
                     "clip_id": job["clip_id"], "clip_url": clip_url, "name": name, "login": login,
                     "viewers": s.get("viewer_count", 0), "stream_title": s.get("title", ""),
+                    "category": s.get("game_name", ""),
                     "t": job["t"], "created": time.time(), "dur": dur,
                     "words": [list(w) for w in words], "chat": job["chat"][-60:], "stats": st,
                     "viewer_clip": bool(job.get("viewer_clip")), "score1": verdict["score"],
@@ -1102,9 +1115,11 @@ class Bot:
             log(f"  YouTube: Upload-Limit des Kanals – nächster Versuch ab "
                 f"{dt.datetime.fromtimestamp(self.yt_block_until).strftime('%H:%M')}")
             return
-        hook = (verdict.get("hook") or f"{name} in GTA 6 😂").strip().rstrip(".")
-        title = f"{hook} #gta6 #shorts"
-        tags = ["gta 6", "gta6", "gta vi", "gta 6 deutsch", name, "twitch clips", "gaming", "gta 6 highlights"]
+        hook = (verdict.get("hook") or f"{name} eskaliert im Stream 😂").strip().rstrip(".")
+        gta = is_gta(hook, verdict.get("caption", ""))
+        title = f"{hook} {'#gta6 ' if gta else ''}#twitch #shorts"
+        tags = [name, "twitch", "twitch clips", "twitch clips deutsch", "twitch highlights", "streamer", "gaming"] \
+            + (["gta 6", "gta6", "gta 6 deutsch"] if gta else [])
         try:
             url = youtube_upload(out, title, verdict.get("caption", ""), tags)
             self.yt_times.append(time.time())
@@ -1283,7 +1298,7 @@ class Bot:
                 out, info = cb.make_vertical(sel.LIB / f"{cid}.mp4", Path(td), hook, cta=cta)
                 shutil.copy(out, final)
             items.append({"n": n, "clip_id": cid, "name": c["name"], "login": c["login"], "hook": hook, "cta": cta,
-                          "caption": r.get("caption") or c.get("caption1") or f"{c['name']} in GTA 6 😂\n\n#gta6",
+                          "caption": r.get("caption") or c.get("caption1") or f"{c['name']} eskaliert 😂\n\n#twitch",
                           "score": r.get("score", c["score1"]), "what": r.get("what") or c.get("what1", ""),
                           "why": reason or r.get("why", ""), "file": str(final), "dur": info["dur"],
                           "clip_url": c.get("clip_url", ""), "t": c["t"]})
@@ -1322,7 +1337,7 @@ class Bot:
         try:
             entries = items + todo
             lines = "\n".join(f"- id={e['clip_id']} | {e['name']} | Titel: {e['hook']}" for e in entries)
-            prompt = (f"Schreibe für jeden dieser GTA-6-Clips einen {CTA_RULES}.\n{lines}\n"
+            prompt = (f"Schreibe für jeden dieser Twitch-Clips einen {CTA_RULES}.\n{lines}\n"
                       'Antworte NUR mit JSON: {"cta": {"<id>": "<Call-to-Action>"}}')
             try:
                 ctas = parse_json(claude_call(deep_model(), prompt, max_tokens=4000, timeout=120)).get("cta", {})
@@ -1493,7 +1508,7 @@ class Bot:
         if cmd == "/status":
             now = time.time()
             n = int(C["top_n"])
-            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · {C['game']} · geclippt wird Top {n} "
+            lines = [f"{'⏸ Pausiert' if self.paused else '▶️ Läuft'} · {game_label()} · geclippt wird Top {n} "
                      f"(ändern: /erweitere 6)"]
             for i, s in enumerate(self.top_list[:max(10, n)], 1):
                 login = s["user_login"].lower()
@@ -1502,11 +1517,11 @@ class Bot:
                     st = spike_stats(self.chat, login, now)
                     rate = f"Chat {st['rate']:.1f}/s (normal {st['base']:.1f}/s)" if st else "lernt noch…"
                     lock = " · 👥 Plan B" if self.noclip.get(login, 0) > now else ""
-                    lines.append(f"{i}. 👁 {s['user_name']} – {viewers} – {rate}{lock}")
+                    lines.append(f"{i}. 👁 {s['user_name']} – {viewers} – {s.get('game_name', '')} – {rate}{lock}")
                 else:
-                    lines.append(f"{i}. ▫️ {s['user_name']} – {viewers}")
+                    lines.append(f"{i}. ▫️ {s['user_name']} – {viewers} – {s.get('game_name', '')}")
             if not self.top_list:
-                lines.append("Gerade keine deutschen GTA-VI-Streams live.")
+                lines.append("Gerade keine passenden deutschen Streams live.")
             a = recent_activity(10)
             work = self.jobs.qsize() + (1 if self.busy else 0)
             lines.append("")
@@ -1653,7 +1668,7 @@ class Bot:
 
     # --- Hauptschleife ------------------------------------------------------
     def run(self) -> None:
-        log(f"Live-Clipper startet – {C['game']}, Top {C['top_n']} ({C['lang']}), "
+        log(f"Live-Clipper startet – {game_label()}, Top {C['top_n']} ({C['lang']}), "
             f"KI-Check: {'an' if C['anthropic_key'] else 'aus'}, YouTube: {'an' if yt_enabled() else 'aus'}, Instagram: {'an' if ig_enabled() else 'aus'}")
         self.ut.get()  # ggf. Twitch-Freigabe einholen
         import overlay
@@ -1688,7 +1703,7 @@ class Bot:
             try:
                 mode = ("Top-10-Listen um " + "/".join(str(h) for h in C["digest_hours"]) + " Uhr"
                         if C["mode"] == "digest" else "Sofort-Posten")
-                self.tg.message(f"🟢 Live-Clipper gestartet ({C['game']}, Top {C['top_n']}, {mode}). /status für Details.")
+                self.tg.message(f"🟢 Live-Clipper gestartet ({game_label()}, Top {C['top_n']}, {mode}). /status für Details.")
             except Exception as e:
                 log(f"Telegram: {e}")
         watch = {p: p.stat().st_mtime for p in [*ROOT.glob("*.py"), ROOT / ".env"] if p.exists()}
