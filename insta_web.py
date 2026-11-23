@@ -145,9 +145,14 @@ def _latest_reel(page) -> tuple[str, str]:
     page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60_000)
     time.sleep(3)
     prof = page.get_by_role("link", name=re.compile(r"^\s*(Profil|Profile)\s*$", re.I))
-    href = prof.first.get_attribute("href") if _visible(prof) else ""
+    href = prof.first.get_attribute("href") if prof.count() else ""
+    if not href:  # Alternative: Link mit dem Profilbild in der Seitenleiste
+        img = page.locator("a[href^='/'] img[alt*='Profilbild'], a[href^='/'] img[alt*='profile picture']")
+        if img.count():
+            href = img.first.locator("xpath=ancestor::a[1]").get_attribute("href") or ""
     user = (href or "").strip("/").split("/")[0]
-    if not user:
+    if not user or user in ("explore", "reels", "direct", "accounts"):
+        _dump(page, "home")
         return "", ""
     page.goto(f"https://www.instagram.com/{user}/reels/", wait_until="domcontentloaded", timeout=60_000)
     a = page.locator("a[href*='/reel/']").first
