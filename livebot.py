@@ -104,6 +104,8 @@ C = {
     "deep_model": os.getenv("DEEP_MODEL") or "claude-opus-5-5",
     "deep_n": _f("DEEP_N", 12),                            # so viele Kandidaten prüft das starke Modell genau
     "push_gap_min": _f("PUSH_GAP_MIN", 90),
+    "auto_push_min": _f("AUTO_PUSH_MIN", 90),              # ohne /push so viele min nach der Liste selbst posten (0 = aus)
+    "auto_push_n": _f("AUTO_PUSH_N", 3),
     "day_budget": _f("AI_DAY_BUDGET", 13.0),               # USD/Tag: darüber Vorauswahl mit Haiku
     "cycle_budget": _f("AI_CYCLE_BUDGET", 97.0),           # USD seit cycle_start: darüber alles mit Haiku
     "cycle_start": os.getenv("AI_CYCLE_START") or dt.date.today().isoformat(),
@@ -428,7 +430,8 @@ def triggered(st: dict) -> bool:
 # KI-Bewertung + Caption (Claude), mit regelbasiertem Fallback
 # ---------------------------------------------------------------------------
 
-def extract_frames(src: Path, dur: float, n: int = 8, times: list[float] | None = None) -> list[tuple[float, str]]:
+def extract_frames(src: Path, dur: float, n: int = 8, times: list[float] | None = None,
+                   width: int = 768) -> list[tuple[float, str]]:
     """Standbilder als base64-JPEG – an festen Zeitpunkten oder gleichmäßig über den Clip verteilt."""
     import base64
     import overlay
@@ -438,7 +441,7 @@ def extract_frames(src: Path, dur: float, n: int = 8, times: list[float] | None 
         for i, t in enumerate(times):
             out = Path(td) / f"f{i}.jpg"
             subprocess.run([overlay.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.2f}",
-                            "-i", str(src), "-frames:v", "1", "-vf", "scale=768:-2", "-q:v", "4", str(out)],
+                            "-i", str(src), "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "4", str(out)],
                            check=False, timeout=30)
             if out.exists():
                 frames.append((t, base64.b64encode(out.read_bytes()).decode()))
@@ -582,6 +585,9 @@ CTA_RULES = ("Call-to-Action für die letzten 3 Sekunden des Videos: Deutsch, h�
              "gern witzig und passend zum Clip – bei GTA 6 z. B. mit Lucia, Mandy, Jason oder Vice City, sonst passend zu "
              "Streamer, Spiel oder Situation. Beispiele: 'Folge für mehr Clips deiner Lieblingsstreamer 🎮', 'Folge – "
              "dann klappt es auch mit Lucia 😏'. Genau 1 Emoji, keine Anführungszeichen, keine Hashtags")
+NUDITY_RULE = ("true, wenn auf IRGENDEINEM Bild nackte Menschen zu sehen sind: entblößte Brüste, Po oder Genitalien, "
+               "Sexszenen, Stripclub/Lapdance – echt (auch in der Facecam) oder im Spiel. Männer mit nacktem Oberkörper "
+               "sowie Bikini/Badehose zählen nicht. Im Zweifel true")
 CAPTION_RULES = ("Post-Caption auf Deutsch: GENAU EIN kurzer, lockerer Satz zum Geschehen (höchstens 10 Wörter) mit 1-2 "
                  "passenden Emojis, dann eine Leerzeile, dann 5-7 Hashtags inkl. #twitch, dem Streamernamen und – wenn "
                  "ein Spiel läuft – dem Spiel (z. B. #gta6). KEIN Link, KEIN Credit")
@@ -633,15 +639,44 @@ Antworte NUR mit JSON:
 {{"what": "<1-2 Sätze, sachlich>", "score": <0-10>, "why": "<1 kurzer Satz, warum der Clip zieht oder nicht>",
  "hook": "<{HOOK_RULES}>",
  "cta": "<{CTA_RULES}>",
- "caption": "<{CAPTION_RULES}>"}}"""})
+ "caption": "<{CAPTION_RULES}>",
+ "nackt": <{NUDITY_RULE}>}}"""})
     for attempt in range(2):
         try:
             j = parse_json(claude_call(model, content, max_tokens=10000, timeout=240))
             j["score"] = int(j.get("score", 0))
+            j["nackt"] = j.get("nackt") in (True, "true", "True", 1)
             return j
         except Exception as e:
             log(f"  Genaue Prüfung {c['clip_id'][:20]} fehlgeschlagen (Versuch {attempt + 1}): {str(e)[:150]}")
     return None
+
+
+def nudity_scan(video: Path, dur: float = 0.0) -> tuple[bool, str]:
+    """Ganzes fertiges Video Bild für Bild (alle 2 s) auf Nacktheit prüfen – vor automatischen Posts.
+    Rückgabe (nackt?, wo). Klappt die Prüfung nicht, gilt das Video als nicht sicher."""
+    if dur <= 0:
+        try:
+            dur = float(cb.probe(video)["dur"])
+        except Exception:
+            dur = 0.0
+    if dur <= 0:
+        return True, "Länge nicht lesbar"
+    n = max(8, min(36, int(dur / 2)))
+    content: list[dict] = []
+    for t, b64 in extract_frames(video, dur, n=n, width=384):
+        content.append({"type": "text", "text": f"{t:.0f}s:"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+    if len(content) < 2 * n * 0.8:
+        return True, "Bilder fehlen"
+    content.append({"type": "text", "text": "Das sind Standbilder aus einem Kurzvideo (oben Facecam eines Streamers, unten "
+                    "Spielszene). Prüfe JEDES Bild. Antworte NUR mit JSON: "
+                    f'{{"nackt": <{NUDITY_RULE}>, "wo": "<Sekunde und was zu sehen ist, sonst leer>"}}'})
+    try:
+        j = parse_json(claude_call(deep_model(), content, max_tokens=4000, timeout=180))
+        return j.get("nackt") in (True, "true", "True", 1), str(j.get("wo", ""))[:120]
+    except Exception as e:
+        return True, f"Prüfung fehlgeschlagen: {str(e)[:80]}"
 
 
 def rank_candidates(items: list[dict], model: str, n: int = 10) -> list[tuple[str, str]]:
@@ -922,6 +957,7 @@ class Bot:
         self.yt_times: collections.deque = collections.deque()
         self.busy = False
         self.digest_busy = False
+        self.auto_busy = False
         self.instant_busy = 0
         self.instant_lock = threading.Lock()
         self.pending_file = STATE / "pending.json"
@@ -1333,25 +1369,27 @@ class Bot:
                           "caption": r.get("caption") or c.get("caption1") or f"{c['name']} eskaliert 😂\n\n#twitch",
                           "score": r.get("score", c["score1"]), "what": r.get("what") or c.get("what1", ""),
                           "why": reason or r.get("why", ""), "file": str(final), "dur": info["dur"],
-                          "clip_url": c.get("clip_url", ""), "t": c["t"]})
+                          "clip_url": c.get("clip_url", ""), "t": c["t"], "nackt": bool(r.get("nackt"))})
             log(f"  #{n} {c['name']} {items[-1]['score']}/10 – {hook} | Ende: {cta}")
         if slot is not None:  # vorbereitet – pünktlich zur vollen Stunde schicken
             wait = (slot - dt.datetime.now()).total_seconds()
             if wait > 0:
                 time.sleep(min(wait, 20 * 60))
         tt_hint = " · mit TikTok: <code>/push 3 7 1 tiktok</code>" if tiktok_web.ready() else ""
+        sent_at = time.time()
         self.tg.message(f"🏆 <b>Top {len(items)} · {span} Uhr</b>\n{len(cands)} Clips gesammelt, {len(pool)} genau "
                         f"geprüft ({html.escape(model)}).\n\nAuswählen: <code>/push 3 7 1</code> – der erste geht sofort "
-                        f"raus, die anderen alle {C['push_gap_min']:.0f} min{tt_hint}", parse_html=True)
+                        f"raus, die anderen alle {C['push_gap_min']:.0f} min{tt_hint}{self.auto_hint(sent_at)}",
+                        parse_html=True)
         for it in items:
-            cap = (f"<b>#{it['n']}</b> · {html.escape(it['name'])} · {it['score']}/10\n"
+            cap = (f"<b>#{it['n']}</b> · {html.escape(it['name'])} · {it['score']}/10{' · 🔞' if it['nackt'] else ''}\n"
                    f"<b>{html.escape(it['hook'])}</b>\n👉 Ende: {html.escape(it.get('cta', ''))}\n"
                    f"💡 {html.escape(it['why'])}\n📝 {html.escape(it['what'])}")
             try:
                 self.tg.video(Path(it["file"]), cap[:1000], cb.W, cb.H, it["dur"])
             except Exception as e:
                 log(f"  Telegram-Video #{it['n']}: {e}")
-        sel.save_digest({"label": label, "span": span, "sent_at": time.time(), "items": items,
+        sel.save_digest({"label": label, "span": span, "sent_at": sent_at, "items": items,
                          "collected": len(cands), "reviewed": len(pool), "model": model})
         sel.set_status([c["clip_id"] for c in cands], "done")
         self.send_list()
@@ -1435,7 +1473,7 @@ class Bot:
                 inst.setdefault("items", {})[iid] = item
                 sel.save_instant(inst)
                 tt = " · mit TikTok: <code>/push {0} tiktok</code>".format(iid) if tiktok_web.ready() else ""
-                cap = (f"⚡ <b>{iid}</b> · {html.escape(c['name'])} · {item['score']}/10\n"
+                cap = (f"⚡ <b>{iid}</b> · {html.escape(c['name'])} · {item['score']}/10{' · 🔞' if r.get('nackt') else ''}\n"
                        f"<b>{html.escape(hook)}</b>\n👉 Ende: {html.escape(cta)}\n📝 {html.escape(item['what'])}\n\n"
                        f"Posten: <code>/push {iid}</code>{tt}")
                 self.tg.video(final, cap[:1000], cb.W, cb.H, info["dur"], notify=True)  # nur diese mit Ton
@@ -1451,9 +1489,13 @@ class Bot:
             self.tg.message("Noch keine Top-10-Liste verschickt.")
             return
         lines = [f"📋 <b>Top {len(d['items'])} · {d['span']} Uhr</b>"]
-        lines += [f"<b>#{it['n']}</b> {html.escape(it['name'])} · {it['score']}/10 – {html.escape(it['hook'])}"
-                  for it in d["items"]]
+        lines += [f"<b>#{it['n']}</b> {html.escape(it['name'])} · {it['score']}/10{' · 🔞' if it.get('nackt') else ''}"
+                  f" – {html.escape(it['hook'])}" for it in d["items"]]
         lines.append("\nAuswählen: <code>/push 3 7 1</code> (optional <code>tiktok</code> dahinter)")
+        if d.get("pushed") or d.get("skip") or d.get("auto_done"):
+            lines.append("Aus dieser Liste ist schon entschieden – kein automatischer Post mehr.")
+        else:
+            lines.append(self.auto_hint(d.get("sent_at", 0)).strip())
         self.tg.message("\n".join(lines), parse_html=True)
 
     def cleanup(self) -> None:
@@ -1530,19 +1572,92 @@ class Bot:
         if tiktok and not tiktok_web.ready():
             tiktok, tt_note = False, "\n⚠️ TikTok ist nicht eingeloggt – geht nur auf YouTube und Instagram."
         plats = ["youtube", "instagram"] + (["tiktok"] if tiktok else [])
-        times = sel.plan_times(len(nums), dt.datetime.now(), int(C["push_gap_min"]))
+        if any(isinstance(n, int) for n in nums) and d:
+            d["pushed"] = True  # Leo hat aus der Liste gewählt -> kein Auto-Post
+            sel.save_digest(d)
+        times = self.schedule_items([(n, items[n]) for n in nums], plats)
+        names = " + ".join({"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}[p] for p in plats)
+        lines = [f"✅ Geplant ({names}):"] + [f"{t:%H:%M} – #{n} {items[n]['hook']}" for n, t in zip(nums, times)]
+        self.tg.message("\n".join(lines) + tt_note)
+        log(f"/push {' '.join(map(str, nums))}{' tiktok' if tiktok else ''} geplant")
+
+    def schedule_items(self, pairs: list, plats: list[str]) -> list[dt.datetime]:
+        """[(Nummer, Listeneintrag)] einplanen: erster sofort, dann alle push_gap_min Minuten."""
+        times = sel.plan_times(len(pairs), dt.datetime.now(), int(C["push_gap_min"]))
         sch = sel.load_schedule()
-        for n, t in zip(nums, times):
-            it = items[n]
+        for (n, it), t in zip(pairs, times):
             sch.append({"id": f"{it['clip_id']}-{int(time.time() * 1000) % 10**7}-{n}", "n": n, "due": t.timestamp(),
                         "clip_id": it["clip_id"], "name": it["name"], "login": it["login"], "hook": it["hook"],
                         "caption": it["caption"], "score": it["score"], "file": it["file"], "platforms": plats,
                         "status": "geplant"})
         sel.save_schedule(sch)
-        names = " + ".join({"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}[p] for p in plats)
-        lines = [f"✅ Geplant ({names}):"] + [f"{t:%H:%M} – #{n} {items[n]['hook']}" for n, t in zip(nums, times)]
-        self.tg.message("\n".join(lines) + tt_note)
-        log(f"/push {' '.join(map(str, nums))}{' tiktok' if tiktok else ''} geplant")
+        return times
+
+    # --- Automatisch posten, wenn Leo nicht auswählt ---------------------
+    def auto_hint(self, sent_at: float) -> str:
+        if not C["auto_push_min"] or not sent_at:
+            return ""
+        at = time.strftime("%H:%M", time.localtime(sent_at + C["auto_push_min"] * 60))
+        return (f"\n⏱ Wählst du bis {at} nichts aus, poste ich die {C['auto_push_n']:.0f} besten automatisch "
+                f"(YouTube + Instagram, nie mit Nacktheit). <code>/keine</code> = diesmal nichts posten.")
+
+    def auto_tick(self) -> None:
+        if not C["auto_push_min"] or self.paused or self.auto_busy:
+            return
+        d = sel.load_digest() or {}
+        if not d.get("items") or d.get("pushed") or d.get("skip") or d.get("auto_done"):
+            return
+        due = d.get("sent_at", 0) + C["auto_push_min"] * 60
+        if time.time() < due:
+            return
+        d["auto_done"] = True
+        sel.save_digest(d)
+        if time.time() - due > 3 * 3600:  # Bot war lange aus – alte Liste nicht mehr nachträglich posten
+            log(f"Auto-Post für Liste {d.get('span')} verpasst (zu alt) – übersprungen")
+            return
+        self.auto_busy = True
+        threading.Thread(target=self._auto_push, args=(d,), daemon=True).start()
+
+    def _auto_push(self, d: dict) -> None:
+        try:
+            done = {e["clip_id"] for e in sel.load_schedule()}
+            picks, skipped = [], []
+            for it in d["items"]:
+                if len(picks) >= int(C["auto_push_n"]):
+                    break
+                if it["clip_id"] in done or not Path(it["file"]).exists():
+                    continue
+                if it.get("nackt"):
+                    skipped.append(f"#{it['n']} (Nacktheit laut Prüfung)")
+                    continue
+                naked, where = nudity_scan(Path(it["file"]), float(it.get("dur") or 0))
+                if naked:
+                    skipped.append(f"#{it['n']} ({where or 'Nacktheit'})")
+                    log(f"  Auto-Post: #{it['n']} übersprungen – {where}")
+                    continue
+                picks.append(it)
+            if not picks:
+                self.tg.message(f"⏱ Keine Auswahl aus der Liste {d.get('span')} – aber kein Clip war sicher genug für "
+                                "einen automatischen Post." + (f"\nÜbersprungen: {', '.join(skipped)}" if skipped else ""))
+                return
+            d2 = sel.load_digest() or {}
+            if d2.get("sent_at") != d.get("sent_at") or d2.get("pushed") or d2.get("skip"):
+                return  # in der Zwischenzeit doch gewählt oder neue Liste
+            plats = ["youtube", "instagram"]
+            times = self.schedule_items([(it["n"], it) for it in picks], plats)
+            lines = [f"⏱ Keine Auswahl bis {time.strftime('%H:%M', time.localtime(d['sent_at'] + C['auto_push_min'] * 60))}"
+                     f" – ich poste automatisch (YouTube + Instagram):"]
+            lines += [f"{t:%H:%M} – #{it['n']} {it['hook']}" for it, t in zip(picks, times)]
+            if skipped:
+                lines.append("🔞 Übersprungen: " + ", ".join(skipped))
+            lines.append("Ändern: /plan zeigt alles, /stop bricht die geplanten ab.")
+            self.tg.message("\n".join(lines))
+            log(f"Auto-Post Liste {d.get('span')}: {' '.join('#' + str(it['n']) for it in picks)} geplant"
+                f"{' · übersprungen ' + ', '.join(skipped) if skipped else ''}")
+        except Exception as e:
+            log(f"Auto-Post fehlgeschlagen: {e}")
+        finally:
+            self.auto_busy = False
 
     def plan_text(self) -> str:
         sch = sorted(sel.load_schedule(), key=lambda e: e["due"])
@@ -1616,6 +1731,9 @@ class Bot:
                              f"{nxt:%H:%M}{' (wird gerade erstellt)' if self.digest_busy else ''} · gesammelt: "
                              f"{len(sel.candidates('new'))} Kandidaten")
                 plan = sorted((e for e in sel.load_schedule() if e.get("status") == "geplant"), key=lambda e: e["due"])
+                if C["auto_push_min"]:
+                    lines.append(f"⏱ Ohne Auswahl postet der Bot {C['auto_push_min']:.0f} min nach jeder Liste die "
+                                 f"{C['auto_push_n']:.0f} besten selbst (nie mit Nacktheit) · /keine = auslassen")
                 lines.append(f"📅 Geplant: {len(plan)} Posts" + (f" (nächster {time.strftime('%H:%M', time.localtime(plan[0]['due']))} "
                                                                  f"#{plan[0]['n']})" if plan else "") + " · /plan")
                 lines.append(f"🤖 KI: Vorauswahl {stage1_model()} · genaue Prüfung {deep_model()} · heute "
@@ -1700,6 +1818,14 @@ class Bot:
             self.tg.message(f"⏹ {n} geplante Posts abgebrochen.")
         elif cmd == "/liste":
             self.send_list()
+        elif cmd in ("/keine", "/nichts", "/skip"):
+            d = sel.load_digest() or {}
+            if not d.get("items") or d.get("auto_done") or d.get("pushed"):
+                self.tg.message("Für die aktuelle Liste ist schon entschieden – da wird nichts mehr automatisch gepostet.")
+            else:
+                d["skip"] = True
+                sel.save_digest(d)
+                self.tg.message(f"👌 Aus der Liste {d.get('span')} wird nichts automatisch gepostet.")
         elif cmd == "/digest":
             if self.digest_busy:
                 self.tg.message("Eine Top-10-Liste wird gerade schon erstellt.")
@@ -1766,7 +1892,8 @@ class Bot:
             else:
                 self.tg.message("Streamer ist nicht unter den aktuellen Top-Streams. /status zeigt sie.")
         elif cmd in ("/start", "/help"):
-            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] (Sofort-Clips: /push M2) · /immer <name> · /leise on|off · "
+            self.tg.message("Befehle: /status · /liste · /push 3 7 1 [tiktok] (Sofort-Clips: /push M2) · /keine (Liste "
+                            "nicht automatisch posten) · /immer <name> · /leise on|off · "
                             "/plan · /stop · /digest (Liste sofort) · "
                             "/pause · /resume · /erweitere <Zahl> · /yt on|off · /ig on|off · /tt on|off")
 
@@ -1831,7 +1958,8 @@ class Bot:
                 # Code/Config geändert -> sauber beenden, launchd startet neu
                 changed = [p.name for p, m in watch.items() if p.exists() and p.stat().st_mtime != m]
                 if changed:
-                    if not self.busy and not self.pub_lock.locked() and not self.digest_busy and not self.instant_busy:
+                    if not self.busy and not self.pub_lock.locked() and not self.digest_busy and not self.instant_busy \
+                            and not self.auto_busy:
                         log(f"{', '.join(changed)} geändert – Neustart")
                         os._exit(3)
                     log(f"{', '.join(changed)} geändert – Neustart nach dem aktuellen Clip")
@@ -1861,6 +1989,7 @@ class Bot:
                 last_tick = now
                 try:
                     self.schedule_tick()
+                    self.auto_tick()
                     if not self.digest_busy:
                         ds = sel.due_slot(C["digest_hours"], dt.datetime.now())
                         if ds:
